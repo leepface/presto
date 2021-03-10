@@ -44,6 +44,20 @@ public final class WeightedAverageAggregations
         state.setNumerator(state.getNumerator() + (weight * value));
     }
 
+    @InputFunction
+    public static void input(@AggregationState FractionState state, @SqlType(StandardTypes.BIGINT) long value, @SqlType(StandardTypes.BIGINT) long weight)
+    {
+        state.setDenominator(state.getNumerator() + weight);
+        state.setNumerator(state.getNumerator() + (weight * value));
+    }
+
+    @InputFunction
+    public static void input(@AggregationState FractionState state, @SqlType(StandardTypes.DOUBLE) double value, @SqlType(StandardTypes.BIGINT) long weight)
+    {
+        state.setDenominator(state.getDenominator() + weight);
+        state.setNumerator(state.getNumerator() + (weight * value));
+    }
+
     @CombineFunction
     public static void combine(@AggregationState FractionState state, @AggregationState FractionState otherState)
     {
