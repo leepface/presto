@@ -30,8 +30,10 @@ public class AlluxioCacheConfig
     private DataSize maxCacheSize = new DataSize(2, GIGABYTE);
     private boolean configValidationEnabled;
     private boolean timeoutEnabled;
+    private boolean cacheQuotaEnabled;
     private Duration timeoutDuration = new Duration(60, SECONDS);
     private int timeoutThreads = 64;
+    private int evictionRetries;
 
     public boolean isMetricsCollectionEnabled()
     {
@@ -147,6 +149,32 @@ public class AlluxioCacheConfig
     public AlluxioCacheConfig setTimeoutEnabled(boolean timeoutEnabled)
     {
         this.timeoutEnabled = timeoutEnabled;
+        return this;
+    }
+
+    public int getEvictionRetries()
+    {
+        return evictionRetries;
+    }
+
+    @Config("cache.alluxio.eviction-retries")
+    @ConfigDescription("The maximum number of eviction retries")
+    public AlluxioCacheConfig setEvictionRetries(int evictionRetries)
+    {
+        this.evictionRetries = evictionRetries;
+        return this;
+    }
+
+    public boolean isCacheQuotaEnabled()
+    {
+        return cacheQuotaEnabled;
+    }
+
+    @Config("cache.alluxio.quota-enabled")
+    @ConfigDescription("Whether to enable quota for alluxio caching operations")
+    public AlluxioCacheConfig setCacheQuotaEnabled(boolean cacheQuotaEnabled)
+    {
+        this.cacheQuotaEnabled = cacheQuotaEnabled;
         return this;
     }
 }

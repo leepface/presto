@@ -18,6 +18,7 @@ import com.facebook.airlift.json.JsonModule;
 import com.facebook.presto.eventlistener.EventListenerManager;
 import com.facebook.presto.eventlistener.EventListenerModule;
 import com.facebook.presto.execution.resourceGroups.ResourceGroupManager;
+import com.facebook.presto.execution.warnings.WarningCollectorModule;
 import com.facebook.presto.metadata.StaticCatalogStore;
 import com.facebook.presto.metadata.StaticFunctionNamespaceStore;
 import com.facebook.presto.security.AccessControl;
@@ -27,8 +28,12 @@ import com.facebook.presto.server.PluginManager;
 import com.facebook.presto.server.SessionPropertyDefaults;
 import com.facebook.presto.server.security.PasswordAuthenticatorManager;
 import com.facebook.presto.spark.classloader_interface.SparkProcessType;
+import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.parser.SqlParserOptions;
+import com.facebook.presto.storage.TempStorageManager;
+import com.facebook.presto.storage.TempStorageModule;
 import com.facebook.presto.testing.TestingAccessControlManager;
+import com.facebook.presto.testing.TestingTempStorageManager;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Injector;
@@ -54,9 +59,11 @@ public class PrestoSparkInjectorFactory
     private final Optional<Map<String, String>> eventListenerProperties;
     private final Optional<Map<String, String>> accessControlProperties;
     private final Optional<Map<String, String>> sessionPropertyConfigurationProperties;
+    private final Optional<Map<String, Map<String, String>>> functionNamespaceProperties;
+    private final Optional<Map<String, Map<String, String>>> tempStorageProperties;
     private final SqlParserOptions sqlParserOptions;
     private final List<Module> additionalModules;
-    private final boolean useAccessControlForTesting;
+    private final boolean isForTesting;
 
     public PrestoSparkInjectorFactory(
             SparkProcessType sparkProcessType,
@@ -65,6 +72,8 @@ public class PrestoSparkInjectorFactory
             Optional<Map<String, String>> eventListenerProperties,
             Optional<Map<String, String>> accessControlProperties,
             Optional<Map<String, String>> sessionPropertyConfigurationProperties,
+            Optional<Map<String, Map<String, String>>> functionNamespaceProperties,
+            Optional<Map<String, Map<String, String>>> tempStorageProperties,
             SqlParserOptions sqlParserOptions,
             List<Module> additionalModules)
     {
@@ -75,6 +84,8 @@ public class PrestoSparkInjectorFactory
                 eventListenerProperties,
                 accessControlProperties,
                 sessionPropertyConfigurationProperties,
+                functionNamespaceProperties,
+                tempStorageProperties,
                 sqlParserOptions,
                 additionalModules,
                 false);
@@ -87,9 +98,11 @@ public class PrestoSparkInjectorFactory
             Optional<Map<String, String>> eventListenerProperties,
             Optional<Map<String, String>> accessControlProperties,
             Optional<Map<String, String>> sessionPropertyConfigurationProperties,
+            Optional<Map<String, Map<String, String>>> functionNamespaceProperties,
+            Optional<Map<String, Map<String, String>>> tempStorageProperties,
             SqlParserOptions sqlParserOptions,
             List<Module> additionalModules,
-            boolean useAccessControlForTesting)
+            boolean isForTesting)
     {
         this.sparkProcessType = requireNonNull(sparkProcessType, "sparkProcessType is null");
         this.configProperties = ImmutableMap.copyOf(requireNonNull(configProperties, "configProperties is null"));
@@ -98,9 +111,15 @@ public class PrestoSparkInjectorFactory
         this.eventListenerProperties = requireNonNull(eventListenerProperties, "eventListenerProperties is null").map(ImmutableMap::copyOf);
         this.accessControlProperties = requireNonNull(accessControlProperties, "accessControlProperties is null").map(ImmutableMap::copyOf);
         this.sessionPropertyConfigurationProperties = requireNonNull(sessionPropertyConfigurationProperties, "sessionPropertyConfigurationProperties is null").map(ImmutableMap::copyOf);
+        this.functionNamespaceProperties = requireNonNull(functionNamespaceProperties, "functionNamespaceProperties is null")
+                .map(map -> map.entrySet().stream()
+                        .collect(toImmutableMap(Map.Entry::getKey, entry -> ImmutableMap.copyOf(entry.getValue()))));
+        this.tempStorageProperties = requireNonNull(tempStorageProperties, "tempStorageProperties is null")
+                .map(map -> map.entrySet().stream()
+                        .collect(toImmutableMap(Map.Entry::getKey, entry -> ImmutableMap.copyOf(entry.getValue()))));
         this.sqlParserOptions = requireNonNull(sqlParserOptions, "sqlParserOptions is null");
         this.additionalModules = ImmutableList.copyOf(requireNonNull(additionalModules, "additionalModules is null"));
-        this.useAccessControlForTesting = useAccessControlForTesting;
+        this.isForTesting = isForTesting;
     }
 
     public Injector create()
@@ -113,18 +132,22 @@ public class PrestoSparkInjectorFactory
         modules.add(
                 new JsonModule(),
                 new EventListenerModule(),
-                new PrestoSparkModule(sparkProcessType, sqlParserOptions));
+                new PrestoSparkModule(sparkProcessType, sqlParserOptions),
+                new WarningCollectorModule());
 
-        if (useAccessControlForTesting) {
-            modules.add(
-                    binder -> {
-                        binder.bind(TestingAccessControlManager.class).in(Scopes.SINGLETON);
-                        binder.bind(AccessControlManager.class).to(TestingAccessControlManager.class).in(Scopes.SINGLETON);
-                        binder.bind(AccessControl.class).to(AccessControlManager.class).in(Scopes.SINGLETON);
-                    });
+        if (isForTesting) {
+            modules.add(binder -> {
+                binder.bind(TestingAccessControlManager.class).in(Scopes.SINGLETON);
+                binder.bind(AccessControlManager.class).to(TestingAccessControlManager.class).in(Scopes.SINGLETON);
+                binder.bind(AccessControl.class).to(AccessControlManager.class).in(Scopes.SINGLETON);
+
+                binder.bind(TestingTempStorageManager.class).in(Scopes.SINGLETON);
+                binder.bind(TempStorageManager.class).to(TestingTempStorageManager.class).in(Scopes.SINGLETON);
+            });
         }
         else {
             modules.add(new AccessControlModule());
+            modules.add(new TempStorageModule());
         }
 
         modules.addAll(additionalModules);
@@ -140,29 +163,44 @@ public class PrestoSparkInjectorFactory
 
         app.setRequiredConfigurationProperties(ImmutableMap.copyOf(requiredProperties));
 
-        Injector injector = app.strictConfig().initialize();
+        Injector injector = app.initialize();
 
         try {
             injector.getInstance(PluginManager.class).loadPlugins();
             injector.getInstance(StaticCatalogStore.class).loadCatalogs(catalogProperties);
-            injector.getInstance(StaticFunctionNamespaceStore.class).loadFunctionNamespaceManagers();
             injector.getInstance(ResourceGroupManager.class).loadConfigurationManager();
             injector.getInstance(PasswordAuthenticatorManager.class).loadPasswordAuthenticator();
             eventListenerProperties.ifPresent(properties -> injector.getInstance(EventListenerManager.class).loadConfiguredEventListener(properties));
-            if (!useAccessControlForTesting) {
+
+            if (!isForTesting) {
                 if (accessControlProperties.isPresent()) {
                     injector.getInstance(AccessControlManager.class).loadSystemAccessControl(accessControlProperties.get());
                 }
                 else {
                     injector.getInstance(AccessControlManager.class).loadSystemAccessControl();
                 }
+
+                if (tempStorageProperties.isPresent()) {
+                    injector.getInstance(TempStorageManager.class).loadTempStorages(tempStorageProperties.get());
+                }
             }
+
             if ((sparkProcessType.equals(DRIVER))) {
                 if (sessionPropertyConfigurationProperties.isPresent()) {
                     injector.getInstance(SessionPropertyDefaults.class).loadConfigurationManager(sessionPropertyConfigurationProperties.get());
                 }
                 else {
                     injector.getInstance(SessionPropertyDefaults.class).loadConfigurationManager();
+                }
+            }
+
+            if (sparkProcessType.equals(DRIVER) ||
+                    !injector.getInstance(FeaturesConfig.class).isInlineSqlFunctions()) {
+                if (functionNamespaceProperties.isPresent()) {
+                    injector.getInstance(StaticFunctionNamespaceStore.class).loadFunctionNamespaceManagers(functionNamespaceProperties.get());
+                }
+                else {
+                    injector.getInstance(StaticFunctionNamespaceStore.class).loadFunctionNamespaceManagers();
                 }
             }
         }

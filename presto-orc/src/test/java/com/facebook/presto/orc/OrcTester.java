@@ -13,7 +13,6 @@
  */
 package com.facebook.presto.orc;
 
-import com.facebook.hive.orc.OrcConf;
 import com.facebook.hive.orc.lazy.OrcLazyObject;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.Subfield;
@@ -91,6 +90,7 @@ import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapred.JobConf;
+import org.apache.orc.OrcConf;
 import org.joda.time.DateTimeZone;
 
 import java.io.File;
@@ -120,6 +120,10 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_BUILD_STRIDE_DICTIONARY;
+import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_COMPRESSION;
+import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_DICTIONARY_ENCODING_INTERVAL;
+import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_ENTROPY_STRING_THRESHOLD;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.common.type.Chars.truncateToLengthAndTrimSpaces;
@@ -202,7 +206,6 @@ public class OrcTester
     {
         ORC_12(OrcEncoding.ORC) {
             @Override
-            @SuppressWarnings("deprecation")
             public Serializer createSerializer()
             {
                 return new OrcSerde();
@@ -210,7 +213,6 @@ public class OrcTester
         },
         ORC_11(OrcEncoding.ORC) {
             @Override
-            @SuppressWarnings("deprecation")
             public Serializer createSerializer()
             {
                 return new OrcSerde();
@@ -224,7 +226,6 @@ public class OrcTester
             }
 
             @Override
-            @SuppressWarnings("deprecation")
             public Serializer createSerializer()
             {
                 return new com.facebook.hive.orc.OrcSerde();
@@ -248,7 +249,6 @@ public class OrcTester
             return true;
         }
 
-        @SuppressWarnings("deprecation")
         public abstract Serializer createSerializer();
     }
 
@@ -919,20 +919,21 @@ public class OrcTester
                 assertEquals(block.getPositionCount(), positionCount);
                 checkNullValues(type, block);
 
-                List<Object> data = new ArrayList<>(positionCount);
-                for (int position = 0; position < positionCount; position++) {
-                    data.add(type.getObjectValue(SESSION.getSqlFunctionProperties(), block, position));
-                }
-
-                for (int position = 0; position < positionCount; position++) {
-                    assertColumnValueEquals(type, data.get(position), expectedValues.get(i).get(rowsProcessed + position));
-                }
+                assertBlockEquals(type, block, expectedValues.get(i), rowsProcessed);
             }
 
             rowsProcessed += positionCount;
         }
 
         assertEquals(rowsProcessed, expectedValues.get(0).size());
+    }
+
+    static void assertBlockEquals(Type type, Block block, List<?> expectedValues, int offset)
+    {
+        int positionCount = block.getPositionCount();
+        for (int position = 0; position < positionCount; position++) {
+            assertColumnValueEquals(type, type.getObjectValue(SESSION.getSqlFunctionProperties(), block, position), expectedValues.get(offset + position));
+        }
     }
 
     private static Map<Integer, Map<Subfield, TupleDomainFilter>> addOrderTracking(Map<Integer, Map<Subfield, TupleDomainFilter>> filters, TupleDomainFilterOrderChecker orderChecker)
@@ -1042,14 +1043,7 @@ public class OrcTester
                         assertEquals(block.getPositionCount(), batchSize);
                         checkNullValues(type, block);
 
-                        List<Object> data = new ArrayList<>(block.getPositionCount());
-                        for (int position = 0; position < block.getPositionCount(); position++) {
-                            data.add(type.getObjectValue(SESSION.getSqlFunctionProperties(), block, position));
-                        }
-
-                        for (int position = 0; position < block.getPositionCount(); position++) {
-                            assertColumnValueEquals(type, data.get(position), expectedValues.get(i).get(rowsProcessed + position));
-                        }
+                        assertBlockEquals(type, block, expectedValues.get(i), rowsProcessed);
                     }
                 }
                 assertEquals(recordReader.getReaderPosition(), rowsProcessed);
@@ -1107,7 +1101,7 @@ public class OrcTester
             if (nestedType instanceof ArrayType) {
                 assertTrue(pathElement instanceof Subfield.LongSubscript);
                 if (nestedValue == null) {
-                    return filter == IS_NULL;
+                    return filter.testNull();
                 }
                 int index = toIntExact(((Subfield.LongSubscript) pathElement).getIndex()) - 1;
                 nestedType = ((ArrayType) nestedType).getElementType();
@@ -1350,7 +1344,7 @@ public class OrcTester
         return builder.build();
     }
 
-    private static void assertColumnValueEquals(Type type, Object actual, Object expected)
+    public static void assertColumnValueEquals(Type type, Object actual, Object expected)
     {
         if (actual == null) {
             assertEquals(actual, expected);
@@ -1509,7 +1503,7 @@ public class OrcTester
         writeOrcColumnsPresto(outputFile, format, compression, Optional.empty(), ImmutableList.of(type), ImmutableList.of(values), new OrcWriterStats());
     }
 
-    public static void writeOrcColumnsPresto(File outputFile, Format format, CompressionKind compression, Optional<DwrfWriterEncryption> dwrfWriterEncryption, List<Type> types, List<List<?>> values, OrcWriterStats stats)
+    public static void writeOrcColumnsPresto(File outputFile, Format format, CompressionKind compression, Optional<DwrfWriterEncryption> dwrfWriterEncryption, List<Type> types, List<List<?>> values, WriterStats stats)
             throws Exception
     {
         List<String> columnNames = makeColumnNames(types.size());
@@ -1968,7 +1962,7 @@ public class OrcTester
         Object row = objectInspector.create();
 
         List<StructField> fields = ImmutableList.copyOf(objectInspector.getAllStructFieldRefs());
-        @SuppressWarnings("deprecation") Serializer serializer = format.createSerializer();
+        Serializer serializer = format.createSerializer();
 
         for (int i = 0; i < values.get(0).size(); i++) {
             for (int j = 0; j < types.size(); j++) {
@@ -2210,8 +2204,8 @@ public class OrcTester
             throws IOException
     {
         JobConf jobConf = new JobConf();
-        jobConf.set("hive.exec.orc.write.format", format == ORC_12 ? "0.12" : "0.11");
-        jobConf.set("hive.exec.orc.default.compress", compression.name());
+        OrcConf.WRITE_FORMAT.setString(jobConf, format == ORC_12 ? "0.12" : "0.11");
+        OrcConf.COMPRESS.setString(jobConf, compression.name());
 
         return new OrcOutputFormat().getHiveRecordWriter(
                 jobConf,
@@ -2226,11 +2220,10 @@ public class OrcTester
             throws IOException
     {
         JobConf jobConf = new JobConf();
-        jobConf.set("hive.exec.orc.default.compress", compressionCodec.name());
-        jobConf.set("hive.exec.orc.compress", compressionCodec.name());
-        OrcConf.setIntVar(jobConf, OrcConf.ConfVars.HIVE_ORC_ENTROPY_STRING_THRESHOLD, 1);
-        OrcConf.setIntVar(jobConf, OrcConf.ConfVars.HIVE_ORC_DICTIONARY_ENCODING_INTERVAL, 2);
-        OrcConf.setBoolVar(jobConf, OrcConf.ConfVars.HIVE_ORC_BUILD_STRIDE_DICTIONARY, true);
+        com.facebook.hive.orc.OrcConf.setVar(jobConf, HIVE_ORC_COMPRESSION, compressionCodec.name());
+        com.facebook.hive.orc.OrcConf.setIntVar(jobConf, HIVE_ORC_ENTROPY_STRING_THRESHOLD, 1);
+        com.facebook.hive.orc.OrcConf.setIntVar(jobConf, HIVE_ORC_DICTIONARY_ENCODING_INTERVAL, 2);
+        com.facebook.hive.orc.OrcConf.setBoolVar(jobConf, HIVE_ORC_BUILD_STRIDE_DICTIONARY, true);
 
         return new com.facebook.hive.orc.OrcOutputFormat().getHiveRecordWriter(
                 jobConf,
@@ -2260,12 +2253,12 @@ public class OrcTester
         String columnTypes = types.stream()
                 .map(OrcTester::getJavaObjectInspector)
                 .map(ObjectInspector::getTypeName)
-                .collect(Collectors.joining(", "));
+                .collect(Collectors.joining(","));
 
         Properties orderTableProperties = new Properties();
-        orderTableProperties.setProperty("columns", String.join(", ", makeColumnNames(types.size())));
+        orderTableProperties.setProperty("columns", String.join(",", makeColumnNames(types.size())));
         orderTableProperties.setProperty("columns.types", columnTypes);
-        orderTableProperties.setProperty("orc.bloom.filter.columns", String.join(", ", makeColumnNames(types.size())));
+        orderTableProperties.setProperty("orc.bloom.filter.columns", String.join(",", makeColumnNames(types.size())));
         orderTableProperties.setProperty("orc.bloom.filter.fpp", "0.50");
         orderTableProperties.setProperty("orc.bloom.filter.write.version", "original");
         return orderTableProperties;

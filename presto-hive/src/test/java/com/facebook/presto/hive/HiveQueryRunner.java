@@ -16,12 +16,12 @@ package com.facebook.presto.hive;
 import com.facebook.airlift.log.Logger;
 import com.facebook.airlift.log.Logging;
 import com.facebook.presto.Session;
+import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.execution.QueryManagerConfig.ExchangeMaterializationStrategy;
 import com.facebook.presto.hive.TestHiveEventListenerPlugin.TestingHiveEventListenerPlugin;
 import com.facebook.presto.hive.authentication.NoHdfsAuthentication;
 import com.facebook.presto.hive.metastore.Database;
 import com.facebook.presto.hive.metastore.file.FileHiveMetastore;
-import com.facebook.presto.metadata.QualifiedObjectName;
 import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.spi.security.PrincipalType;
 import com.facebook.presto.spi.security.SelectedRole;
@@ -216,6 +216,8 @@ public final class HiveQueryRunner
                         "query.hash-partition-count", "11",
                         "colocated-joins-enabled", "true",
                         "grouped-execution-enabled", "true"),
+                "sql-standard",
+                ImmutableMap.of("hive.create-empty-bucket-files-for-temporary-table", "false"),
                 Optional.empty());
     }
 

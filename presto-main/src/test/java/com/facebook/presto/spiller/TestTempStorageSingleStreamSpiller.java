@@ -13,9 +13,9 @@
  */
 package com.facebook.presto.spiller;
 
-import com.facebook.presto.block.BlockEncodingManager;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.block.BlockBuilder;
+import com.facebook.presto.common.block.BlockEncodingManager;
 import com.facebook.presto.common.io.OutputStreamDataSink;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.memory.context.LocalMemoryContext;
@@ -122,7 +122,7 @@ public class TestTempStorageSingleStreamSpiller
                 toIntExact(new DataSize(4, KILOBYTE).toBytes()),
                 LocalTempStorage.NAME);
         LocalMemoryContext memoryContext = newSimpleAggregatedMemoryContext().newLocalMemoryContext("test");
-        SingleStreamSpiller singleStreamSpiller = spillerFactory.create(TYPES, bytes -> {}, memoryContext);
+        SingleStreamSpiller singleStreamSpiller = spillerFactory.create(TYPES, new TestingSpillContext(), memoryContext);
         assertTrue(singleStreamSpiller instanceof TempStorageSingleStreamSpiller);
         TempStorageSingleStreamSpiller spiller = (TempStorageSingleStreamSpiller) singleStreamSpiller;
 

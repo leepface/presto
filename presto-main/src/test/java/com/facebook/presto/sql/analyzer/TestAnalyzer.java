@@ -22,6 +22,7 @@ import com.facebook.presto.memory.MemoryManagerConfig;
 import com.facebook.presto.memory.NodeMemoryConfig;
 import com.facebook.presto.metadata.SessionPropertyManager;
 import com.facebook.presto.spi.PrestoWarning;
+import com.facebook.presto.spi.StandardWarningCode;
 import com.facebook.presto.spi.WarningCollector;
 import org.testng.annotations.Test;
 
@@ -36,6 +37,7 @@ import static com.facebook.presto.sql.analyzer.SemanticErrorCode.COLUMN_TYPE_UNK
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.DUPLICATE_COLUMN_NAME;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.DUPLICATE_PROPERTY;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.DUPLICATE_RELATION;
+import static com.facebook.presto.sql.analyzer.SemanticErrorCode.INVALID_FUNCTION_NAME;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.INVALID_LITERAL;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.INVALID_ORDINAL;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.INVALID_PARAMETER_USAGE;
@@ -71,6 +73,7 @@ import static com.facebook.presto.sql.analyzer.SemanticErrorCode.VIEW_ANALYSIS_E
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.VIEW_IS_RECURSIVE;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.VIEW_IS_STALE;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.WILDCARD_WITHOUT_FROM;
+import static com.facebook.presto.sql.analyzer.SemanticErrorCode.WINDOW_FUNCTION_ORDERBY_LITERAL;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.WINDOW_REQUIRES_OVER;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
@@ -81,6 +84,21 @@ import static org.testng.Assert.assertTrue;
 public class TestAnalyzer
         extends AbstractAnalyzerTest
 {
+    private static void assertHasWarning(WarningCollector warningCollector, StandardWarningCode code, String match)
+    {
+        List<PrestoWarning> warnings = warningCollector.getWarnings();
+        assertEquals(warnings.size(), 1);
+        PrestoWarning warning = warnings.get(0);
+        assertEquals(warning.getWarningCode(), code.toWarningCode());
+        assertTrue(warning.getMessage().startsWith(match));
+    }
+
+    private static void assertNoWarning(WarningCollector warningCollector)
+    {
+        List<PrestoWarning> warnings = warningCollector.getWarnings();
+        assertTrue(warnings.isEmpty());
+    }
+
     @Test
     public void testNonComparableGroupBy()
     {
@@ -97,6 +115,57 @@ public class TestAnalyzer
     public void testNonComparableWindowOrder()
     {
         assertFails(TYPE_MISMATCH, "SELECT row_number() OVER (ORDER BY t.x) FROM (VALUES(color('red'))) AS t(x)");
+    }
+
+    @Test
+    public void testORWarning()
+    {
+        assertHasWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a OR t1.b = t2.b"),
+                PERFORMANCE_WARNING, "line 1:41: JOIN conditions with an OR can cause performance issues as it may lead to a cross join with filter");
+        assertHasWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a OR t1.a != t2.b AND t1.b > t2.b"),
+                PERFORMANCE_WARNING, "line 1:41: JOIN conditions with an OR can cause performance issues as it may lead to a cross join with filter");
+        assertHasWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a AND t1.a != t2.b OR t1.b > t2.b"),
+                PERFORMANCE_WARNING, "line 1:58: JOIN conditions with an OR can cause performance issues as it may lead to a cross join with filter");
+        assertHasWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a OR IF(t2.b = t1.a OR t2.b = null, 'YES', 'NO') = 'YES'"),
+                PERFORMANCE_WARNING, "line 1:41: JOIN conditions with an OR can cause performance issues as it may lead to a cross join with filter");
+        assertHasWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON (t1.a = t2.a AND t1.b = t2.b) OR (t1.a > t1.b AND t1.b > t1.a)"),
+                PERFORMANCE_WARNING, "line 1:59: JOIN conditions with an OR can cause performance issues as it may lead to a cross join with filter");
+    }
+
+    @Test void testNoORWarning()
+    {
+        assertNoWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a"));
+        assertNoWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a AND t1.b = t2.b"));
+        assertNoWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a AND IF(t2.b = t1.a OR t2.b = null, 'YES', 'NO') = 'YES'"));
+        assertNoWarning(analyzeWithWarnings("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a \n" + "AND (t1.b = t2.b OR t1.b > t2.b)"));
+    }
+
+    @Test
+    public void testWindowOrderByAnalysis()
+    {
+        assertHasWarning(analyzeWithWarnings("SELECT SUM(x) OVER (PARTITION BY y ORDER BY 1) AS s\n" +
+                "FROM (values (1,10), (2, 10)) AS T(x, y)"), PERFORMANCE_WARNING, "ORDER BY literals/constants with window function:");
+
+        assertHasWarning(analyzeWithWarnings("SELECT SUM(x) OVER (ORDER BY 1) AS s\n" +
+                "FROM (values (1,10), (2, 10)) AS T(x, y)"), PERFORMANCE_WARNING, "ORDER BY literals/constants with window function:");
+
+        // Now test for error when the session param is set to disallow this.
+        Session session = testSessionBuilder(new SessionPropertyManager(new SystemSessionProperties(
+                new QueryManagerConfig(),
+                new TaskManagerConfig(),
+                new MemoryManagerConfig(),
+                new FeaturesConfig().setAllowWindowOrderByLiterals(false),
+                new NodeMemoryConfig(),
+                new WarningCollectorConfig()))).build();
+        assertFails(session, WINDOW_FUNCTION_ORDERBY_LITERAL,
+                "SELECT SUM(x) OVER (PARTITION BY y ORDER BY 1) AS s\n" +
+                        "FROM (values (1,10), (2, 10)) AS T(x, y)");
+        assertFails(session, WINDOW_FUNCTION_ORDERBY_LITERAL,
+                "SELECT SUM(x) OVER (ORDER BY 1) AS s\n" +
+                        "FROM (values (1,10), (2, 10)) AS T(x, y)");
+
+        analyze(session, "SELECT SUM(x) OVER (PARTITION BY y ORDER BY y) AS s\n" +
+                        "FROM (values (1,10), (2, 10)) AS T(x, y)");
     }
 
     @Test
@@ -1514,5 +1583,18 @@ public class TestAnalyzer
     public void testEmptySchemaName()
     {
         assertFails(MISSING_SCHEMA, "SELECT * FROM \"\".foo");
+    }
+
+    @Test
+    public void testReplaceTemporaryFunctionFails()
+    {
+        assertFails(NOT_SUPPORTED, "CREATE OR REPLACE TEMPORARY FUNCTION foo() RETURNS INT RETURN 1");
+    }
+
+    @Test
+    public void testInvalidTemporaryFunctionName()
+    {
+        assertFails(INVALID_FUNCTION_NAME, "CREATE TEMPORARY FUNCTION sum() RETURNS INT RETURN 1");
+        assertFails(INVALID_FUNCTION_NAME, "CREATE TEMPORARY FUNCTION dev.test.foo() RETURNS INT RETURN 1");
     }
 }

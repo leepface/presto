@@ -16,21 +16,23 @@ package com.facebook.presto.server;
 import com.facebook.airlift.concurrent.BoundedExecutor;
 import com.facebook.airlift.configuration.AbstractConfigurationAwareModule;
 import com.facebook.airlift.http.server.TheServlet;
+import com.facebook.airlift.json.ObjectMapperProvider;
 import com.facebook.airlift.stats.GcMonitor;
 import com.facebook.airlift.stats.JmxGcMonitor;
 import com.facebook.airlift.stats.PauseMeter;
 import com.facebook.drift.client.address.AddressSelector;
+import com.facebook.drift.codec.utils.DefaultThriftCodecsModule;
 import com.facebook.drift.transport.netty.client.DriftNettyClientModule;
 import com.facebook.drift.transport.netty.server.DriftNettyServerModule;
 import com.facebook.presto.GroupByHashPageIndexerFactory;
 import com.facebook.presto.PagesIndexPageSorter;
 import com.facebook.presto.SystemSessionProperties;
-import com.facebook.presto.block.BlockEncodingManager;
 import com.facebook.presto.block.BlockJsonSerde;
 import com.facebook.presto.client.NodeVersion;
 import com.facebook.presto.client.ServerInfo;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.block.BlockEncoding;
+import com.facebook.presto.common.block.BlockEncodingManager;
 import com.facebook.presto.common.block.BlockEncodingSerde;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.TypeManager;
@@ -167,6 +169,7 @@ import com.facebook.presto.type.TypeDeserializer;
 import com.facebook.presto.util.FinalizerService;
 import com.facebook.presto.util.GcStatusMonitor;
 import com.facebook.presto.version.EmbedVersion;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
 import com.google.inject.Key;
@@ -201,6 +204,7 @@ import static com.facebook.presto.execution.scheduler.NodeSchedulerConfig.Networ
 import static com.facebook.presto.execution.scheduler.NodeSchedulerConfig.NetworkTopologyType.LEGACY;
 import static com.facebook.presto.server.smile.SmileCodecBinder.smileCodecBinder;
 import static com.facebook.presto.sql.analyzer.FeaturesConfig.TaskSpillingStrategy.PER_TASK_MEMORY_THRESHOLD;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.inject.multibindings.MapBinder.newMapBinder;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
@@ -229,7 +233,10 @@ public class ServerMainModule
     {
         ServerConfig serverConfig = buildConfigObject(ServerConfig.class);
 
-        if (serverConfig.isCoordinator()) {
+        if (serverConfig.isResourceManager()) {
+            install(new ResourceManagerModule());
+        }
+        else if (serverConfig.isCoordinator()) {
             install(new CoordinatorModule());
         }
         else {
@@ -319,6 +326,8 @@ public class ServerMainModule
         binder.bind(TaskManagementExecutor.class).in(Scopes.SINGLETON);
         binder.bind(SqlTaskManager.class).in(Scopes.SINGLETON);
         binder.bind(TaskManager.class).to(Key.get(SqlTaskManager.class));
+
+        install(new DefaultThriftCodecsModule());
 
         // memory revoking scheduler
         install(installModuleIf(
@@ -461,6 +470,7 @@ public class ServerMainModule
 
         // handle resolver
         binder.install(new HandleJsonModule());
+        binder.bind(ObjectMapper.class).toProvider(ObjectMapperProvider.class);
 
         // connector
         binder.bind(ScalarStatsCalculator.class).in(Scopes.SINGLETON);
@@ -496,9 +506,12 @@ public class ServerMainModule
         binder.bind(NodeVersion.class).toInstance(nodeVersion);
 
         // presto announcement
+        checkArgument(!(serverConfig.isResourceManager() && serverConfig.isCoordinator()),
+                "Server cannot be configured as both resource manager and coordinator");
         discoveryBinder(binder).bindHttpAnnouncement("presto")
                 .addProperty("node_version", nodeVersion.toString())
                 .addProperty("coordinator", String.valueOf(serverConfig.isCoordinator()))
+                .addProperty("resource_manager", String.valueOf(serverConfig.isResourceManager()))
                 .addProperty("connectorIds", nullToEmpty(serverConfig.getDataSources()));
 
         // server info resource
@@ -544,7 +557,7 @@ public class ServerMainModule
 
         install(installModuleIf(
                 FeaturesConfig.class,
-                config -> config.getSingleStreamSpillerChoice() == SingleStreamSpillerChoice.FILE,
+                config -> config.getSingleStreamSpillerChoice() == SingleStreamSpillerChoice.LOCAL_FILE,
                 moduleBinder -> moduleBinder
                         .bind(SingleStreamSpillerFactory.class)
                         .to(FileSingleStreamSpillerFactory.class)

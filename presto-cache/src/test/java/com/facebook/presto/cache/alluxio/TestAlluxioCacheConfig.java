@@ -35,13 +35,15 @@ public class TestAlluxioCacheConfig
         assertRecordedDefaults(recordDefaults(AlluxioCacheConfig.class)
                 .setAsyncWriteEnabled(false)
                 .setConfigValidationEnabled(false)
+                .setEvictionRetries(0)
                 .setJmxClass("alluxio.metrics.sink.JmxSink")
                 .setMaxCacheSize(new DataSize(2, GIGABYTE))
                 .setMetricsCollectionEnabled(true)
                 .setMetricsDomain("com.facebook.alluxio")
                 .setTimeoutDuration(new Duration(60, SECONDS))
                 .setTimeoutEnabled(false)
-                .setTimeoutThreads(64));
+                .setTimeoutThreads(64)
+                .setCacheQuotaEnabled(false));
     }
 
     @Test
@@ -50,6 +52,7 @@ public class TestAlluxioCacheConfig
         Map<String, String> properties = new ImmutableMap.Builder<String, String>()
                 .put("cache.alluxio.async-write-enabled", "true")
                 .put("cache.alluxio.config-validation-enabled", "true")
+                .put("cache.alluxio.eviction-retries", "5")
                 .put("cache.alluxio.jmx-class", "test.TestJmxSink")
                 .put("cache.alluxio.max-cache-size", "42MB")
                 .put("cache.alluxio.metrics-domain", "test.alluxio")
@@ -57,10 +60,12 @@ public class TestAlluxioCacheConfig
                 .put("cache.alluxio.timeout-duration", "120s")
                 .put("cache.alluxio.timeout-enabled", "true")
                 .put("cache.alluxio.timeout-threads", "512")
+                .put("cache.alluxio.quota-enabled", "true")
                 .build();
 
         AlluxioCacheConfig expected = new AlluxioCacheConfig()
                 .setAsyncWriteEnabled(true)
+                .setEvictionRetries(5)
                 .setMaxCacheSize(new DataSize(42, MEGABYTE))
                 .setMetricsCollectionEnabled(false)
                 .setMetricsDomain("test.alluxio")
@@ -68,7 +73,8 @@ public class TestAlluxioCacheConfig
                 .setConfigValidationEnabled(true)
                 .setTimeoutDuration(new Duration(120, SECONDS))
                 .setTimeoutEnabled(true)
-                .setTimeoutThreads(512);
+                .setTimeoutThreads(512)
+                .setCacheQuotaEnabled(true);
 
         assertFullMapping(properties, expected);
     }

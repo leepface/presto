@@ -101,6 +101,8 @@ import com.facebook.presto.spi.connector.ConnectorPartitioningMetadata;
 import com.facebook.presto.spi.connector.ConnectorSplitManager;
 import com.facebook.presto.spi.connector.ConnectorSplitManager.SplitSchedulingContext;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
+import com.facebook.presto.spi.function.SqlFunctionId;
+import com.facebook.presto.spi.function.SqlInvokedFunction;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.spi.security.ConnectorIdentity;
@@ -137,6 +139,7 @@ import org.testng.annotations.Test;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -771,6 +774,7 @@ public abstract class AbstractTestHiveClient
         invalidTableHandle = new HiveTableHandle(database, INVALID_TABLE);
         invalidTableLayoutHandle = new HiveTableLayoutHandle(
                 invalidTable,
+                "path",
                 ImmutableList.of(),
                 ImmutableList.of(),
                 ImmutableMap.of(),
@@ -831,6 +835,7 @@ public abstract class AbstractTestHiveClient
         tableLayout = new ConnectorTableLayout(
                 new HiveTableLayoutHandle(
                         tablePartitionFormat,
+                        "path",
                         partitionColumns,
                         ImmutableList.of(
                                 new Column("t_string", HIVE_STRING, Optional.empty()),
@@ -881,6 +886,7 @@ public abstract class AbstractTestHiveClient
         List<HivePartition> unpartitionedPartitions = ImmutableList.of(new HivePartition(tableUnpartitioned));
         unpartitionedTableLayout = new ConnectorTableLayout(new HiveTableLayoutHandle(
                 tableUnpartitioned,
+                "path",
                 ImmutableList.of(),
                 ImmutableList.of(
                         new Column("t_string", HIVE_STRING, Optional.empty()),
@@ -897,7 +903,7 @@ public abstract class AbstractTestHiveClient
                 "layout",
                 Optional.empty(),
                 false));
-        timeZone = DateTimeZone.forTimeZone(TimeZone.getTimeZone(timeZoneId));
+        timeZone = DateTimeZone.forTimeZone(TimeZone.getTimeZone(ZoneId.of(timeZoneId)));
     }
 
     protected final void setup(String host, int port, String databaseName, String timeZone)
@@ -1009,7 +1015,8 @@ public abstract class AbstractTestHiveClient
         return new HiveClientConfig()
                 .setMaxOpenSortFiles(10)
                 .setWriterSortBufferSize(new DataSize(100, KILOBYTE))
-                .setTemporaryTableSchema(database);
+                .setTemporaryTableSchema(database)
+                .setCreateEmptyBucketFilesForTemporaryTable(false);
     }
 
     protected CacheConfig getCacheConfig()
@@ -1086,6 +1093,12 @@ public abstract class AbstractTestHiveClient
             }
 
             @Override
+            public Map<SqlFunctionId, SqlInvokedFunction> getSessionFunctions()
+            {
+                return session.getSessionFunctions();
+            }
+
+            @Override
             public <T> T getProperty(String name, Class<T> type)
             {
                 Object value = extraProperties.get(name);
@@ -1094,6 +1107,12 @@ public abstract class AbstractTestHiveClient
                 }
 
                 return session.getProperty(name, type);
+            }
+
+            @Override
+            public Optional<String> getSchema()
+            {
+                return Optional.empty();
             }
         };
     }
@@ -2043,6 +2062,7 @@ public abstract class AbstractTestHiveClient
 
             HiveTableLayoutHandle modifiedReadBucketCountLayoutHandle = new HiveTableLayoutHandle(
                     layoutHandle.getSchemaTableName(),
+                    layoutHandle.getTablePath(),
                     layoutHandle.getPartitionColumns(),
                     layoutHandle.getDataColumns(),
                     layoutHandle.getTableParameters(),
@@ -2623,7 +2643,7 @@ public abstract class AbstractTestHiveClient
                         .orElseThrow(AssertionError::new);
 
                 // verify directory is empty
-                HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+                HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName(), table.getStorage().getLocation(), false);
                 Path location = new Path(table.getStorage().getLocation());
                 assertTrue(listDirectory(context, location).isEmpty());
 
@@ -2731,7 +2751,7 @@ public abstract class AbstractTestHiveClient
                 // begin creating the table
                 ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(temporaryCreateRollbackTable, CREATE_TABLE_COLUMNS, createTableProperties(RCBINARY));
 
-                ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(session, tableMetadata, Optional.empty());
+                HiveOutputTableHandle outputHandle = (HiveOutputTableHandle) metadata.beginCreateTable(session, tableMetadata, Optional.empty());
 
                 // write the data
                 ConnectorPageSink sink = pageSinkProvider.createPageSink(transaction.getTransactionHandle(), session, outputHandle, TEST_HIVE_PAGE_SINK_CONTEXT);
@@ -2740,7 +2760,12 @@ public abstract class AbstractTestHiveClient
 
                 // verify we have data files
                 stagingPathRoot = getStagingPathRoot(outputHandle);
-                HdfsContext context = new HdfsContext(session, temporaryCreateRollbackTable.getSchemaName(), temporaryCreateRollbackTable.getTableName());
+                HdfsContext context = new HdfsContext(
+                        session,
+                        temporaryCreateRollbackTable.getSchemaName(),
+                        temporaryCreateRollbackTable.getTableName(),
+                        outputHandle.getLocationHandle().getTargetPath().toString(),
+                        true);
                 assertFalse(listAllDataFiles(context, stagingPathRoot).isEmpty());
 
                 // rollback the table
@@ -2748,7 +2773,12 @@ public abstract class AbstractTestHiveClient
             }
 
             // verify all files have been deleted
-            HdfsContext context = new HdfsContext(newSession(), temporaryCreateRollbackTable.getSchemaName(), temporaryCreateRollbackTable.getTableName());
+            HdfsContext context = new HdfsContext(
+                    newSession(),
+                    temporaryCreateRollbackTable.getSchemaName(),
+                    temporaryCreateRollbackTable.getTableName(),
+                    "test_path",
+                    false);
             assertTrue(listAllDataFiles(context, stagingPathRoot).isEmpty());
 
             // verify table is not in the metastore
@@ -2892,7 +2922,7 @@ public abstract class AbstractTestHiveClient
                                     .build())
                             .build());
 
-            ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(session, tableMetadata, Optional.empty());
+            HiveOutputTableHandle outputHandle = (HiveOutputTableHandle) metadata.beginCreateTable(session, tableMetadata, Optional.empty());
 
             // write the data
             ConnectorPageSink sink = pageSinkProvider.createPageSink(transaction.getTransactionHandle(), session, outputHandle, TEST_HIVE_PAGE_SINK_CONTEXT);
@@ -2915,7 +2945,12 @@ public abstract class AbstractTestHiveClient
 
             // verify we have enough temporary files per bucket to require multiple passes
             Path path = useTempPath ? getTempFilePathRoot(outputHandle).get() : getStagingPathRoot(outputHandle);
-            HdfsContext context = new HdfsContext(session, table.getSchemaName(), table.getTableName());
+            HdfsContext context = new HdfsContext(
+                    session,
+                    table.getSchemaName(),
+                    table.getTableName(),
+                    outputHandle.getLocationHandle().getTargetPath().toString(),
+                    true);
             Set<String> files = listAllDataFiles(context, path);
             assertThat(listAllDataFiles(context, path))
                     .filteredOn(file -> file.contains(".tmp-sort"))
@@ -3147,6 +3182,54 @@ public abstract class AbstractTestHiveClient
     }
 
     @Test
+    public void testCreateBucketedTemporaryTableWithMissingBuckets()
+    {
+        List<ColumnMetadata> columns = TEMPORARY_TABLE_COLUMNS;
+        List<String> bucketingColumns = TEMPORARY_TABLE_BUCKET_COLUMNS;
+        int bucketCount = TEMPORARY_TABLE_BUCKET_COUNT;
+        MaterializedResult singleRow = MaterializedResult.resultBuilder(SESSION, VARCHAR, VARCHAR)
+                .row("1", "value1")
+                .build();
+        ConnectorSession session = newSession();
+
+        HiveTableHandle tableHandle;
+        try (Transaction transaction = newTransaction()) {
+            ConnectorMetadata metadata = transaction.getMetadata();
+
+            // prepare temporary table schema
+            List<Type> types = columns.stream()
+                    .map(ColumnMetadata::getType)
+                    .collect(toImmutableList());
+            ConnectorPartitioningMetadata partitioning = new ConnectorPartitioningMetadata(
+                    metadata.getPartitioningHandleForExchange(session, bucketCount, types),
+                    bucketingColumns);
+
+            // create temporary table
+            tableHandle = (HiveTableHandle) metadata.createTemporaryTable(session, columns, Optional.of(partitioning));
+
+            // begin insert into temporary table
+            HiveInsertTableHandle insert = (HiveInsertTableHandle) metadata.beginInsert(session, tableHandle);
+
+            // insert into temporary table
+            ConnectorPageSink firstSink = pageSinkProvider.createPageSink(transaction.getTransactionHandle(), session, insert, TEST_HIVE_PAGE_SINK_CONTEXT);
+            firstSink.appendPage(singleRow.toPage());
+            Collection<Slice> fragments = getFutureValue(firstSink.finish());
+
+            if (singleRow.getRowCount() == 0) {
+                assertThat(fragments).isEmpty();
+            }
+
+            // finish insert
+            metadata.finishInsert(session, insert, fragments, ImmutableList.of());
+
+            // Only one split since there is only one non empty bucket
+            assertEquals(getAllSplits(transaction, tableHandle, TupleDomain.all()).size(), 1);
+
+            transaction.rollback();
+        }
+    }
+
+    @Test
     public void testCreateBucketedTemporaryTable()
             throws Exception
     {
@@ -3236,8 +3319,8 @@ public abstract class AbstractTestHiveClient
             // finish only second insert
             metadata.finishInsert(session, secondInsert, secondFragments, ImmutableList.of());
 
-            // check that there are splits for every bucket
-            assertEquals(getAllSplits(transaction, tableHandle, TupleDomain.all()).size(), bucketCount);
+            // no splits for empty buckets if zero row file is not created
+            assertLessThanOrEqual(getAllSplits(transaction, tableHandle, TupleDomain.all()).size(), bucketCount);
 
             // verify written data
             Map<String, ColumnHandle> allColumnHandles = metadata.getColumnHandles(session, tableHandle);
@@ -3273,7 +3356,7 @@ public abstract class AbstractTestHiveClient
                     .isInstanceOf(TableNotFoundException.class);
         }
 
-        HdfsContext context = new HdfsContext(newSession(), tableHandle.getSchemaName(), tableHandle.getTableName());
+        HdfsContext context = new HdfsContext(session, tableHandle.getSchemaName(), tableHandle.getTableName(), "test_path", false);
         for (Path location : insertLocations) {
             FileSystem fileSystem = hdfsEnvironment.getFileSystem(context, location);
             assertFalse(fileSystem.exists(location));
@@ -3827,7 +3910,7 @@ public abstract class AbstractTestHiveClient
             // begin creating the table
             ConnectorTableMetadata tableMetadata = new ConnectorTableMetadata(tableName, CREATE_TABLE_COLUMNS, createTableProperties(storageFormat));
 
-            ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(session, tableMetadata, Optional.empty());
+            HiveOutputTableHandle outputHandle = (HiveOutputTableHandle) metadata.beginCreateTable(session, tableMetadata, Optional.empty());
 
             // write the data
             ConnectorPageSink sink = pageSinkProvider.createPageSink(transaction.getTransactionHandle(), session, outputHandle, pageSinkContext);
@@ -3840,7 +3923,12 @@ public abstract class AbstractTestHiveClient
             }
 
             // verify all new files start with the unique prefix
-            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(
+                    session,
+                    tableName.getSchemaName(),
+                    tableName.getTableName(),
+                    outputHandle.getLocationHandle().getTargetPath().toString(),
+                    true);
             for (String filePath : listAllDataFiles(context, getStagingPathRoot(outputHandle))) {
                 assertTrue(new Path(filePath).getName().startsWith(getFilePrefix(outputHandle)));
             }
@@ -3998,7 +4086,7 @@ public abstract class AbstractTestHiveClient
             ConnectorTableHandle tableHandle = getTableHandle(metadata, tableName);
 
             // "stage" insert data
-            ConnectorInsertTableHandle insertTableHandle = metadata.beginInsert(session, tableHandle);
+            HiveInsertTableHandle insertTableHandle = (HiveInsertTableHandle) metadata.beginInsert(session, tableHandle);
             ConnectorPageSink sink = pageSinkProvider.createPageSink(transaction.getTransactionHandle(), session, insertTableHandle, pageSinkContext);
             sink.appendPage(CREATE_TABLE_DATA.toPage());
             sink.appendPage(CREATE_TABLE_DATA.toPage());
@@ -4020,7 +4108,12 @@ public abstract class AbstractTestHiveClient
             }
 
             // verify we did not modify the table target directory
-            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(
+                    session,
+                    tableName.getSchemaName(),
+                    tableName.getTableName(),
+                    insertTableHandle.getLocationHandle().getTargetPath().toString(),
+                    false);
             Path targetPathRoot = getTargetPathRoot(insertTableHandle);
             assertEquals(listAllDataFiles(context, targetPathRoot), existingFiles);
 
@@ -4037,7 +4130,7 @@ public abstract class AbstractTestHiveClient
         }
 
         // verify temp directory is empty
-        HdfsContext context = new HdfsContext(newSession(), tableName.getSchemaName(), tableName.getTableName());
+        HdfsContext context = new HdfsContext(newSession(), tableName.getSchemaName(), tableName.getTableName(), "temp_path", false);
         assertTrue(listAllDataFiles(context, stagingPathRoot).isEmpty());
 
         // verify the data is unchanged
@@ -4111,7 +4204,7 @@ public abstract class AbstractTestHiveClient
     protected Set<String> listAllDataFiles(Transaction transaction, String schemaName, String tableName)
             throws IOException
     {
-        HdfsContext context = new HdfsContext(newSession(), schemaName, tableName);
+        HdfsContext context = new HdfsContext(newSession(), schemaName, tableName, "test_path", false);
         Set<String> existingFiles = new HashSet<>();
         for (String location : listAllDataPaths(transaction.getMetastore(), schemaName, tableName)) {
             existingFiles.addAll(listAllDataFiles(context, new Path(location)));
@@ -4221,7 +4314,7 @@ public abstract class AbstractTestHiveClient
             ConnectorTableHandle tableHandle = getTableHandle(metadata, tableName);
 
             // "stage" insert data
-            ConnectorInsertTableHandle insertTableHandle = metadata.beginInsert(session, tableHandle);
+            HiveInsertTableHandle insertTableHandle = (HiveInsertTableHandle) metadata.beginInsert(session, tableHandle);
             stagingPathRoot = getStagingPathRoot(insertTableHandle);
             ConnectorPageSink sink = pageSinkProvider.createPageSink(transaction.getTransactionHandle(), session, insertTableHandle, pageSinkContext);
             sink.appendPage(CREATE_TABLE_PARTITIONED_DATA_2ND.toPage());
@@ -4233,7 +4326,12 @@ public abstract class AbstractTestHiveClient
             metadata.finishInsert(session, insertTableHandle, fragments, ImmutableList.of());
 
             // verify all temp files start with the unique prefix
-            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(
+                    session,
+                    tableName.getSchemaName(),
+                    tableName.getTableName(),
+                    insertTableHandle.getLocationHandle().getTargetPath().toString(),
+                    false);
             Set<String> tempFiles = listAllDataFiles(context, getStagingPathRoot(insertTableHandle));
             assertTrue(!tempFiles.isEmpty());
             for (String filePath : tempFiles) {
@@ -4258,7 +4356,7 @@ public abstract class AbstractTestHiveClient
             assertEquals(listAllDataFiles(transaction, tableName.getSchemaName(), tableName.getTableName()), existingFiles);
 
             // verify temp directory is empty
-            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName(), stagingPathRoot.toString(), false);
             assertTrue(listAllDataFiles(context, stagingPathRoot).isEmpty());
         }
     }
@@ -4339,7 +4437,7 @@ public abstract class AbstractTestHiveClient
             ConnectorTableHandle tableHandle = getTableHandle(metadata, tableName);
 
             // "stage" insert data
-            ConnectorInsertTableHandle insertTableHandle = metadata.beginInsert(session, tableHandle);
+            HiveInsertTableHandle insertTableHandle = (HiveInsertTableHandle) metadata.beginInsert(session, tableHandle);
             stagingPathRoot = getStagingPathRoot(insertTableHandle);
             ConnectorPageSink sink = pageSinkProvider.createPageSink(transaction.getTransactionHandle(), session, insertTableHandle, pageSinkContext);
             sink.appendPage(CREATE_TABLE_PARTITIONED_DATA.toPage());
@@ -4352,7 +4450,12 @@ public abstract class AbstractTestHiveClient
             metadata.finishInsert(session, insertTableHandle, fragments, ImmutableList.of());
 
             // verify all temp files start with the unique prefix
-            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(
+                    session,
+                    tableName.getSchemaName(),
+                    tableName.getTableName(),
+                    insertTableHandle.getLocationHandle().getTargetPath().toString(),
+                    false);
             Set<String> tempFiles = listAllDataFiles(context, getStagingPathRoot(insertTableHandle));
             assertTrue(!tempFiles.isEmpty());
             for (String filePath : tempFiles) {
@@ -4385,7 +4488,7 @@ public abstract class AbstractTestHiveClient
             assertEquals(listAllDataFiles(transaction, tableName.getSchemaName(), tableName.getTableName()), existingFiles);
 
             // verify temp directory is empty
-            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName(), stagingPathRoot.toString(), false);
             assertTrue(listAllDataFiles(context, stagingPathRoot).isEmpty());
 
             // verify statistics have been rolled back
@@ -4491,7 +4594,7 @@ public abstract class AbstractTestHiveClient
             ConnectorMetadata metadata = transaction.getMetadata();
             ConnectorSession session = newSession();
             ConnectorTableHandle tableHandle = getTableHandle(metadata, tableName);
-            ConnectorInsertTableHandle insertTableHandle = metadata.beginInsert(session, tableHandle);
+            HiveInsertTableHandle insertTableHandle = (HiveInsertTableHandle) metadata.beginInsert(session, tableHandle);
             queryId = session.getQueryId();
             writePath = getStagingPathRoot(insertTableHandle);
             targetPath = getTargetPathRoot(insertTableHandle);
@@ -4509,7 +4612,12 @@ public abstract class AbstractTestHiveClient
 
         // check that temporary files are removed
         if (!writePath.equals(targetPath)) {
-            HdfsContext context = new HdfsContext(newSession(), tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(
+                    newSession(),
+                    tableName.getSchemaName(),
+                    tableName.getTableName(),
+                    targetPath.toString(),
+                    false);
             FileSystem fileSystem = hdfsEnvironment.getFileSystem(context, writePath);
             assertFalse(fileSystem.exists(writePath));
         }
@@ -5223,7 +5331,7 @@ public abstract class AbstractTestHiveClient
             transaction.commit();
         }
 
-        HdfsContext context = new HdfsContext(newSession(), schemaTableName.getSchemaName(), schemaTableName.getTableName());
+        HdfsContext context = new HdfsContext(newSession(), schemaTableName.getSchemaName(), schemaTableName.getTableName(), targetPath.toString(), false);
         List<String> targetDirectoryList = listDirectory(context, targetPath);
         assertEquals(targetDirectoryList, ImmutableList.of());
 
@@ -5454,7 +5562,7 @@ public abstract class AbstractTestHiveClient
 
         // check that temporary files are removed
         if (writePath != null && !writePath.equals(targetPath)) {
-            HdfsContext context = new HdfsContext(newSession(), tableName.getSchemaName(), tableName.getTableName());
+            HdfsContext context = new HdfsContext(newSession(), tableName.getSchemaName(), tableName.getTableName(), writePath.toString(), false);
             FileSystem fileSystem = hdfsEnvironment.getFileSystem(context, writePath);
             assertFalse(fileSystem.exists(writePath));
         }
@@ -5636,7 +5744,7 @@ public abstract class AbstractTestHiveClient
                 throw new TestingRollbackException();
             }
             path = new Path(targetPath + "/pk1=b/pk2=add2");
-            context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName(), path.toString(), true);
             createDirectory(context, hdfsEnvironment, path);
         }
 
@@ -5667,7 +5775,12 @@ public abstract class AbstractTestHiveClient
             }
             assertNotNull(path);
 
-            context = new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName());
+            context = new HdfsContext(
+                    session,
+                    tableName.getSchemaName(),
+                    tableName.getSchemaName(),
+                    path.toString(),
+                    true);
             FileSystem fileSystem = hdfsEnvironment.getFileSystem(context, path);
             fileSystem.createNewFile(path);
         }

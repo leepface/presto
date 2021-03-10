@@ -40,6 +40,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.io.File;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +53,7 @@ import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.hive.ColumnEncryptionInformation.fromTableProperty;
 import static com.facebook.presto.hive.EncryptionInformation.fromEncryptionMetadata;
+import static com.facebook.presto.hive.HiveSessionProperties.NEW_PARTITION_USER_SUPPLIED_PARAMETER;
 import static com.facebook.presto.hive.HiveStorageFormat.DWRF;
 import static com.facebook.presto.hive.HiveStorageFormat.ORC;
 import static com.facebook.presto.hive.HiveTableProperties.BUCKETED_BY_PROPERTY;
@@ -70,7 +72,6 @@ import static com.facebook.presto.hive.HiveTestUtils.HDFS_ENVIRONMENT;
 import static com.facebook.presto.hive.HiveTestUtils.HIVE_CLIENT_CONFIG;
 import static com.facebook.presto.hive.HiveTestUtils.PARTITION_UPDATE_CODEC;
 import static com.facebook.presto.hive.HiveTestUtils.ROW_EXPRESSION_SERVICE;
-import static com.facebook.presto.hive.HiveTestUtils.SESSION;
 import static com.facebook.presto.hive.PartitionUpdate.UpdateMode.APPEND;
 import static com.facebook.presto.hive.PartitionUpdate.UpdateMode.NEW;
 import static com.facebook.presto.hive.PartitionUpdate.UpdateMode.OVERWRITE;
@@ -87,6 +88,9 @@ public class TestHiveMetadataFileFormatEncryptionSettings
     private static final String TEST_SERVER_VERSION = "test_version";
     private static final String TEST_DB_NAME = "test_db";
     private static final JsonCodec<PartitionUpdate> PARTITION_CODEC = jsonCodec(PartitionUpdate.class);
+    private static final ConnectorSession SESSION = new TestingConnectorSession(
+            new HiveSessionProperties(new HiveClientConfig(), new OrcFileWriterConfig(), new ParquetFileWriterConfig()).getSessionProperties(),
+            ImmutableMap.of(NEW_PARTITION_USER_SUPPLIED_PARAMETER, "{}"));
 
     private HiveMetadataFactory metadataFactory;
     private HiveTransactionManager transactionManager;
@@ -105,7 +109,7 @@ public class TestHiveMetadataFileFormatEncryptionSettings
                 metastore,
                 HDFS_ENVIRONMENT,
                 new HivePartitionManager(FUNCTION_AND_TYPE_MANAGER, HIVE_CLIENT_CONFIG),
-                DateTimeZone.forTimeZone(TimeZone.getTimeZone(HIVE_CLIENT_CONFIG.getTimeZone())),
+                DateTimeZone.forTimeZone(TimeZone.getTimeZone(ZoneId.of(HIVE_CLIENT_CONFIG.getTimeZone()))),
                 true,
                 false,
                 false,
@@ -236,7 +240,7 @@ public class TestHiveMetadataFileFormatEncryptionSettings
         }
     }
 
-    @Test
+    @Test(description = "This also tests that NEW_PARTITION_USER_SUPPLIED_PARAMETER also works")
     public void testCreateTableAsSelectWithColumnKeyReference()
     {
         String tableName = "test_ctas_enc_with_column_key";
@@ -265,8 +269,8 @@ public class TestHiveMetadataFileFormatEncryptionSettings
                             "test_provider")));
 
             List<PartitionUpdate> partitionUpdates = ImmutableList.of(
-                    new PartitionUpdate("ds=2020-06-26", NEW, "path1", "path1", ImmutableList.of(), 0, 0, 0),
-                    new PartitionUpdate("ds=2020-06-27", NEW, "path2", "path2", ImmutableList.of(), 0, 0, 0));
+                    new PartitionUpdate("ds=2020-06-26", NEW, "path1", "path1", ImmutableList.of(), 0, 0, 0, false),
+                    new PartitionUpdate("ds=2020-06-27", NEW, "path2", "path2", ImmutableList.of(), 0, 0, 0, false));
 
             metadata.finishCreateTable(
                     SESSION,
@@ -285,6 +289,8 @@ public class TestHiveMetadataFileFormatEncryptionSettings
             Map<String, Optional<Partition>> partitions = metastore.getPartitionsByNames(TEST_DB_NAME, tableName, ImmutableList.of("ds=2020-06-26", "ds=2020-06-27"));
             assertEquals(partitions.get("ds=2020-06-26").get().getParameters().get(TEST_EXTRA_METADATA), "test_algo");
             assertEquals(partitions.get("ds=2020-06-27").get().getParameters().get(TEST_EXTRA_METADATA), "test_algo");
+            // Checking NEW_PARTITION_USER_SUPPLIED_PARAMETER
+            assertEquals(partitions.get("ds=2020-06-27").get().getParameters().get("user_supplied"), "{}");
         }
         finally {
             dropTable(tableName);
@@ -440,8 +446,8 @@ public class TestHiveMetadataFileFormatEncryptionSettings
                                     "test_provider")));
 
             List<PartitionUpdate> partitionUpdates = ImmutableList.of(
-                    new PartitionUpdate("ds=2020-06-26", NEW, "path1", "path1", ImmutableList.of(), 0, 0, 0),
-                    new PartitionUpdate("ds=2020-06-27", NEW, "path2", "path2", ImmutableList.of(), 0, 0, 0));
+                    new PartitionUpdate("ds=2020-06-26", NEW, "path1", "path1", ImmutableList.of(), 0, 0, 0, false),
+                    new PartitionUpdate("ds=2020-06-27", NEW, "path2", "path2", ImmutableList.of(), 0, 0, 0, false));
 
             createHiveMetadata.finishInsert(
                     SESSION,
@@ -458,7 +464,7 @@ public class TestHiveMetadataFileFormatEncryptionSettings
             HiveMetadata overrideHiveMetadata = metadataFactory.get();
             insertTableHandle = overrideHiveMetadata.beginInsert(SESSION, new HiveTableHandle(TEST_DB_NAME, tableName));
             partitionUpdates = ImmutableList.of(
-                    new PartitionUpdate("ds=2020-06-26", OVERWRITE, "path3", "path3", ImmutableList.of(), 0, 0, 0));
+                    new PartitionUpdate("ds=2020-06-26", OVERWRITE, "path3", "path3", ImmutableList.of(), 0, 0, 0, false));
 
             overrideHiveMetadata.finishInsert(
                     SESSION,
@@ -554,7 +560,7 @@ public class TestHiveMetadataFileFormatEncryptionSettings
             HiveInsertTableHandle insertTableHandle = createHiveMetadata.beginInsert(SESSION, new HiveTableHandle(TEST_DB_NAME, tableName));
 
             List<PartitionUpdate> partitionUpdates = ImmutableList.of(
-                    new PartitionUpdate("ds=2020-06-26", NEW, "path1", "path1", ImmutableList.of(), 0, 0, 0));
+                    new PartitionUpdate("ds=2020-06-26", NEW, "path1", "path1", ImmutableList.of(), 0, 0, 0, false));
 
             createHiveMetadata.finishInsert(
                     SESSION,
@@ -566,7 +572,7 @@ public class TestHiveMetadataFileFormatEncryptionSettings
             HiveMetadata appendHiveMetadata = metadataFactory.get();
             insertTableHandle = appendHiveMetadata.beginInsert(SESSION, new HiveTableHandle(TEST_DB_NAME, tableName));
             partitionUpdates = ImmutableList.of(
-                    new PartitionUpdate("ds=2020-06-26", APPEND, "path3", "path3", ImmutableList.of(), 0, 0, 0));
+                    new PartitionUpdate("ds=2020-06-26", APPEND, "path3", "path3", ImmutableList.of(), 0, 0, 0, false));
 
             appendHiveMetadata.finishInsert(
                     SESSION,

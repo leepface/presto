@@ -83,6 +83,7 @@ public class TestFeaturesConfig
                 .setLegacyArrayAgg(false)
                 .setGroupByUsesEqualTo(false)
                 .setLegacyMapSubscript(false)
+                .setReduceAggForComplexTypesEnabled(true)
                 .setRegexLibrary(JONI)
                 .setRe2JDfaStatesLimit(Integer.MAX_VALUE)
                 .setRe2JDfaRetries(5)
@@ -95,9 +96,9 @@ public class TestFeaturesConfig
                 .setMemoryRevokingThreshold(0.9)
                 .setMemoryRevokingTarget(0.5)
                 .setTaskSpillingStrategy(ORDER_BY_CREATE_TIME)
-                .setSingleStreamSpillerChoice(SingleStreamSpillerChoice.FILE)
+                .setSingleStreamSpillerChoice(SingleStreamSpillerChoice.LOCAL_FILE)
                 .setSpillerTempStorage("local")
-                .setMaxRevocableMemoryPerTask(500000L)
+                .setMaxRevocableMemoryPerTask(new DataSize(500, MEGABYTE))
                 .setOptimizeMixedDistinctAggregations(false)
                 .setLegacyLogFunction(false)
                 .setIterativeOptimizerEnabled(true)
@@ -113,6 +114,7 @@ public class TestFeaturesConfig
                 .setPrintStatsForNonJoinQuery(false)
                 .setDefaultFilterFactorEnabled(false)
                 .setExchangeCompressionEnabled(false)
+                .setExchangeChecksumEnabled(false)
                 .setLegacyTimestamp(true)
                 .setLegacyRowFieldOrdinalAccess(false)
                 .setLegacyCharToVarcharCoercion(false)
@@ -148,9 +150,12 @@ public class TestFeaturesConfig
                 .setOptimizeCommonSubExpressions(true)
                 .setPreferDistributedUnion(true)
                 .setOptimizeNullsInJoin(false)
+                .setSkipRedundantSort(true)
                 .setWarnOnNoTableLayoutFilter("")
                 .setInlineSqlFunctions(true)
-                .setCheckAccessControlOnUtilizedColumnsOnly(false));
+                .setCheckAccessControlOnUtilizedColumnsOnly(false)
+                .setAllowWindowOrderByLiterals(true)
+                .setEnforceFixedDistributionForOutputOperator(false));
     }
 
     @Test
@@ -176,6 +181,7 @@ public class TestFeaturesConfig
                 .put("deprecated.legacy-log-function", "true")
                 .put("deprecated.group-by-uses-equal", "true")
                 .put("deprecated.legacy-map-subscript", "true")
+                .put("reduce-agg-for-complex-types-enabled", "false")
                 .put("deprecated.legacy-row-field-ordinal-access", "true")
                 .put("deprecated.legacy-char-to-varchar-coercion", "true")
                 .put("deprecated.legacy-date-timestamp-to-varchar-coercion", "true")
@@ -218,8 +224,9 @@ public class TestFeaturesConfig
                 .put("experimental.spiller.task-spilling-strategy", "PER_TASK_MEMORY_THRESHOLD")
                 .put("experimental.spiller.single-stream-spiller-choice", "TEMP_STORAGE")
                 .put("experimental.spiller.spiller-temp-storage", "crail")
-                .put("experimental.spiller.max-revocable-task-memory", "100000")
+                .put("experimental.spiller.max-revocable-task-memory", "1GB")
                 .put("exchange.compression-enabled", "true")
+                .put("exchange.checksum-enabled", "true")
                 .put("deprecated.legacy-timestamp", "false")
                 .put("optimizer.enable-intermediate-aggregations", "true")
                 .put("parse-decimal-literals-as-double", "true")
@@ -254,6 +261,9 @@ public class TestFeaturesConfig
                 .put("warn-on-no-table-layout-filter", "ry@nlikestheyankees,ds")
                 .put("inline-sql-functions", "false")
                 .put("check-access-control-on-utilized-columns-only", "true")
+                .put("optimizer.skip-redundant-sort", "false")
+                .put("is-allow-window-order-by-literals", "false")
+                .put("enforce-fixed-distribution-for-output-operator", "true")
                 .build();
 
         FeaturesConfig expected = new FeaturesConfig()
@@ -299,6 +309,7 @@ public class TestFeaturesConfig
                 .setLegacyArrayAgg(true)
                 .setGroupByUsesEqualTo(true)
                 .setLegacyMapSubscript(true)
+                .setReduceAggForComplexTypesEnabled(false)
                 .setRegexLibrary(RE2J)
                 .setRe2JDfaStatesLimit(42)
                 .setRe2JDfaRetries(42)
@@ -313,9 +324,10 @@ public class TestFeaturesConfig
                 .setTaskSpillingStrategy(PER_TASK_MEMORY_THRESHOLD)
                 .setSingleStreamSpillerChoice(SingleStreamSpillerChoice.TEMP_STORAGE)
                 .setSpillerTempStorage("crail")
-                .setMaxRevocableMemoryPerTask(100000L)
+                .setMaxRevocableMemoryPerTask(new DataSize(1, GIGABYTE))
                 .setLegacyLogFunction(true)
                 .setExchangeCompressionEnabled(true)
+                .setExchangeChecksumEnabled(true)
                 .setLegacyTimestamp(false)
                 .setLegacyRowFieldOrdinalAccess(true)
                 .setLegacyCharToVarcharCoercion(true)
@@ -351,9 +363,13 @@ public class TestFeaturesConfig
                 .setOptimizeCommonSubExpressions(false)
                 .setPreferDistributedUnion(false)
                 .setOptimizeNullsInJoin(true)
+                .setSkipRedundantSort(false)
                 .setWarnOnNoTableLayoutFilter("ry@nlikestheyankees,ds")
                 .setInlineSqlFunctions(false)
-                .setCheckAccessControlOnUtilizedColumnsOnly(true);
+                .setCheckAccessControlOnUtilizedColumnsOnly(true)
+                .setSkipRedundantSort(false)
+                .setAllowWindowOrderByLiterals(false)
+                .setEnforceFixedDistributionForOutputOperator(true);
         assertFullMapping(properties, expected);
     }
 

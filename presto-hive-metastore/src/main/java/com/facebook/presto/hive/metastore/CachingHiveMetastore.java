@@ -618,8 +618,8 @@ public class CachingHiveMetastore
         HivePartitionName hivePartitionName = hivePartitionName(databaseName, tableName, partitionNameWithVersion.getPartitionName());
         Optional<Partition> partition = partitionCache.getIfPresent(hivePartitionName);
         if (partition != null && partition.isPresent()) {
-            Optional<Integer> partitionVersion = partition.get().getPartitionVersion();
-            if (!partitionVersion.isPresent() || partitionVersion.get() < partitionNameWithVersion.getPartitionVersion()) {
+            Optional<Long> partitionVersion = partition.get().getPartitionVersion();
+            if (!partitionVersion.isPresent() || partitionVersion.get() != partitionNameWithVersion.getPartitionVersion()) {
                 partitionCache.invalidate(hivePartitionName);
                 partitionStatisticsCache.invalidate(hivePartitionName);
             }

@@ -43,6 +43,7 @@ import static com.facebook.presto.sql.analyzer.FeaturesConfig.TaskSpillingStrate
 import static com.facebook.presto.sql.analyzer.RegexLibrary.JONI;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -80,9 +81,9 @@ public class FeaturesConfig
     private boolean spatialJoinsEnabled = true;
     private boolean fastInequalityJoins = true;
     private TaskSpillingStrategy taskSpillingStrategy = ORDER_BY_CREATE_TIME;
-    private SingleStreamSpillerChoice singleStreamSpillerChoice = SingleStreamSpillerChoice.FILE;
+    private SingleStreamSpillerChoice singleStreamSpillerChoice = SingleStreamSpillerChoice.LOCAL_FILE;
     private String spillerTempStorage = "local";
-    private long maxRevocableMemoryPerTask = 500000L;
+    private DataSize maxRevocableMemoryPerTask = new DataSize(500, MEGABYTE);
     private JoinReorderingStrategy joinReorderingStrategy = ELIMINATE_CROSS_JOINS;
     private PartialMergePushdownStrategy partialMergePushdownStrategy = PartialMergePushdownStrategy.NONE;
     private int maxReorderedJoins = 9;
@@ -95,7 +96,9 @@ public class FeaturesConfig
     private boolean enableIntermediateAggregations;
     private boolean pushTableWriteThroughUnion = true;
     private boolean exchangeCompressionEnabled;
+    private boolean exchangeChecksumEnabled;
     private boolean legacyArrayAgg;
+    private boolean reduceAggForComplexTypesEnabled = true;
     private boolean legacyLogFunction;
     private boolean groupByUsesEqualTo;
     private boolean legacyTimestamp = true;
@@ -170,10 +173,14 @@ public class FeaturesConfig
     private boolean pushdownDereferenceEnabled;
     private boolean inlineSqlFunctions = true;
     private boolean checkAccessControlOnUtilizedColumnsOnly;
+    private boolean skipRedundantSort = true;
+    private boolean isAllowWindowOrderByLiterals = true;
 
     private String warnOnNoTableLayoutFilter = "";
 
     private PartitioningPrecisionStrategy partitioningPrecisionStrategy = PartitioningPrecisionStrategy.AUTOMATIC;
+
+    private boolean enforceFixedDistributionForOutputOperator;
 
     public enum PartitioningPrecisionStrategy
     {
@@ -239,7 +246,7 @@ public class FeaturesConfig
 
     public enum SingleStreamSpillerChoice
     {
-        FILE,
+        LOCAL_FILE,
         TEMP_STORAGE
     }
 
@@ -385,6 +392,18 @@ public class FeaturesConfig
     public boolean isLegacyMapSubscript()
     {
         return legacyMapSubscript;
+    }
+
+    @Config("reduce-agg-for-complex-types-enabled")
+    public FeaturesConfig setReduceAggForComplexTypesEnabled(boolean reduceAggForComplexTypesEnabled)
+    {
+        this.reduceAggForComplexTypesEnabled = reduceAggForComplexTypesEnabled;
+        return this;
+    }
+
+    public boolean isReduceAggForComplexTypesEnabled()
+    {
+        return reduceAggForComplexTypesEnabled;
     }
 
     public JoinDistributionType getJoinDistributionType()
@@ -569,14 +588,14 @@ public class FeaturesConfig
         return spillerTempStorage;
     }
 
-    public long getMaxRevocableMemoryPerTask()
+    public DataSize getMaxRevocableMemoryPerTask()
     {
         return maxRevocableMemoryPerTask;
     }
 
     @Config("experimental.spiller.max-revocable-task-memory")
     @ConfigDescription("Only used when task-spilling-strategy is PER_TASK_MEMORY_THRESHOLD")
-    public FeaturesConfig setMaxRevocableMemoryPerTask(long maxRevocableMemoryPerTask)
+    public FeaturesConfig setMaxRevocableMemoryPerTask(DataSize maxRevocableMemoryPerTask)
     {
         this.maxRevocableMemoryPerTask = maxRevocableMemoryPerTask;
         return this;
@@ -948,7 +967,7 @@ public class FeaturesConfig
     @AssertTrue(message = SPILLER_SPILL_PATH + " must be configured when " + SPILL_ENABLED + " is set to true and " + SINGLE_STREAM_SPILLER_CHOICE + " is set to file")
     public boolean isSpillerSpillPathsConfiguredIfSpillEnabled()
     {
-        return !isSpillEnabled() || !spillerSpillPaths.isEmpty() || singleStreamSpillerChoice != SingleStreamSpillerChoice.FILE;
+        return !isSpillEnabled() || !spillerSpillPaths.isEmpty() || singleStreamSpillerChoice != SingleStreamSpillerChoice.LOCAL_FILE;
     }
 
     @Min(1)
@@ -1073,10 +1092,22 @@ public class FeaturesConfig
         return exchangeCompressionEnabled;
     }
 
+    public boolean isExchangeChecksumEnabled()
+    {
+        return exchangeChecksumEnabled;
+    }
+
     @Config("exchange.compression-enabled")
     public FeaturesConfig setExchangeCompressionEnabled(boolean exchangeCompressionEnabled)
     {
         this.exchangeCompressionEnabled = exchangeCompressionEnabled;
+        return this;
+    }
+
+    @Config("exchange.checksum-enabled")
+    public FeaturesConfig setExchangeChecksumEnabled(boolean exchangeChecksumEnabled)
+    {
+        this.exchangeChecksumEnabled = exchangeChecksumEnabled;
         return this;
     }
 
@@ -1461,6 +1492,42 @@ public class FeaturesConfig
     public FeaturesConfig setCheckAccessControlOnUtilizedColumnsOnly(boolean checkAccessControlOnUtilizedColumnsOnly)
     {
         this.checkAccessControlOnUtilizedColumnsOnly = checkAccessControlOnUtilizedColumnsOnly;
+        return this;
+    }
+
+    public boolean isSkipRedundantSort()
+    {
+        return skipRedundantSort;
+    }
+
+    @Config("optimizer.skip-redundant-sort")
+    public FeaturesConfig setSkipRedundantSort(boolean value)
+    {
+        this.skipRedundantSort = value;
+        return this;
+    }
+
+    public boolean isAllowWindowOrderByLiterals()
+    {
+        return isAllowWindowOrderByLiterals;
+    }
+
+    @Config("is-allow-window-order-by-literals")
+    public FeaturesConfig setAllowWindowOrderByLiterals(boolean value)
+    {
+        this.isAllowWindowOrderByLiterals = value;
+        return this;
+    }
+
+    public boolean isEnforceFixedDistributionForOutputOperator()
+    {
+        return enforceFixedDistributionForOutputOperator;
+    }
+
+    @Config("enforce-fixed-distribution-for-output-operator")
+    public FeaturesConfig setEnforceFixedDistributionForOutputOperator(boolean enforceFixedDistributionForOutputOperator)
+    {
+        this.enforceFixedDistributionForOutputOperator = enforceFixedDistributionForOutputOperator;
         return this;
     }
 }

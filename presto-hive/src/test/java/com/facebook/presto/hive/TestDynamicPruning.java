@@ -30,6 +30,7 @@ import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.testing.TestingConnectorSession;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import org.testng.annotations.Test;
 
 import java.io.File;
@@ -148,7 +149,8 @@ public class TestDynamicPruning
                 Optional.empty(),
                 NO_CACHE_REQUIREMENT,
                 Optional.empty(),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                ImmutableSet.of());
 
         TableHandle tableHandle = new TableHandle(
                 new ConnectorId(HIVE_CATALOG),
@@ -156,6 +158,7 @@ public class TestDynamicPruning
                 transaction,
                 Optional.of(new HiveTableLayoutHandle(
                         new SchemaTableName(SCHEMA_NAME, TABLE_NAME),
+                        "path",
                         ImmutableList.of(PARTITION_HIVE_COLUMN_HANDLE),
                         getColumnHandles().stream()
                                 .map(column -> new Column(column.getName(), column.getHiveType(), Optional.empty()))

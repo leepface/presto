@@ -46,6 +46,12 @@ Match Rules
 * ``group`` (optional): regex to match against the fully qualified name of the resource group the query is
   routed to.
 
+* ``clientInfo`` (optional): regex to match against the client info text supplied by the client
+
+* ``overrideSessionProperties`` (optional): boolean to indicate whether session properties should override client specified session properties.
+  Note that once a session property has been overridden by ANY rule it remains overridden even if later higher precedence rules change the
+  value, but don't specify override.
+
 * ``sessionProperties``: map with string keys and values. Each entry is a system or catalog property name and
   corresponding value. Values must be specified as strings, no matter the actual data type.
 

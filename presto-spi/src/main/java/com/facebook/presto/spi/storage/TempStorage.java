@@ -15,18 +15,22 @@ package com.facebook.presto.spi.storage;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.List;
 
 public interface TempStorage
 {
-    void initialize()
+    TempDataSink create(TempDataOperationContext context)
             throws IOException;
 
-    TempDataSink create()
+    InputStream open(TempDataOperationContext context, TempStorageHandle handle)
             throws IOException;
 
-    InputStream open(TempStorageHandle handle)
+    void remove(TempDataOperationContext context, TempStorageHandle handle)
             throws IOException;
 
-    void remove(TempStorageHandle handle)
-            throws IOException;
+    byte[] serializeHandle(TempStorageHandle storageHandle);
+
+    TempStorageHandle deserialize(byte[] serializedStorageHandle);
+
+    List<StorageCapabilities> getStorageCapabilities();
 }

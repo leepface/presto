@@ -14,7 +14,6 @@
 package com.facebook.presto.hive;
 
 import com.facebook.airlift.json.JsonCodec;
-import com.facebook.presto.common.Page;
 import com.facebook.presto.common.Subfield;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.predicate.Domain;
@@ -150,6 +149,7 @@ import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.common.type.Chars.isCharType;
 import static com.facebook.presto.common.type.DateType.DATE;
 import static com.facebook.presto.common.type.TimestampType.TIMESTAMP;
+import static com.facebook.presto.common.type.TypeUtils.isNumericType;
 import static com.facebook.presto.common.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.common.type.VarcharType.createUnboundedVarcharType;
@@ -182,7 +182,8 @@ import static com.facebook.presto.hive.HiveErrorCode.HIVE_TIMEZONE_MISMATCH;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_UNKNOWN_ERROR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_UNSUPPORTED_ENCRYPTION_OPERATION;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_UNSUPPORTED_FORMAT;
-import static com.facebook.presto.hive.HiveManifestUtils.createPartitionManifest;
+import static com.facebook.presto.hive.HiveManifestUtils.getManifestSizeInBytes;
+import static com.facebook.presto.hive.HiveManifestUtils.updatePartitionMetadataWithFileNamesAndSizes;
 import static com.facebook.presto.hive.HivePartition.UNPARTITIONED_ID;
 import static com.facebook.presto.hive.HivePartitioningHandle.createHiveCompatiblePartitioningHandle;
 import static com.facebook.presto.hive.HivePartitioningHandle.createPrestoNativePartitioningHandle;
@@ -198,14 +199,17 @@ import static com.facebook.presto.hive.HiveSessionProperties.getTemporaryTableSt
 import static com.facebook.presto.hive.HiveSessionProperties.getVirtualBucketCount;
 import static com.facebook.presto.hive.HiveSessionProperties.isBucketExecutionEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isCollectColumnStatisticsOnWrite;
+import static com.facebook.presto.hive.HiveSessionProperties.isFileRenamingEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isOfflineDataDebugModeEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isOptimizedMismatchedBucketCount;
+import static com.facebook.presto.hive.HiveSessionProperties.isPreferManifestsToListFiles;
 import static com.facebook.presto.hive.HiveSessionProperties.isRespectTableFormat;
 import static com.facebook.presto.hive.HiveSessionProperties.isShufflePartitionedColumnsForTableWriteEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isSortedWriteToTempPathEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isSortedWritingEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isStatisticsEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isUsePageFileForHiveUnsupportedType;
+import static com.facebook.presto.hive.HiveSessionProperties.shouldCreateEmptyBucketFilesForTemporaryTable;
 import static com.facebook.presto.hive.HiveStorageFormat.AVRO;
 import static com.facebook.presto.hive.HiveStorageFormat.DWRF;
 import static com.facebook.presto.hive.HiveStorageFormat.ORC;
@@ -265,7 +269,6 @@ import static com.facebook.presto.hive.metastore.MetastoreUtil.PRESTO_QUERY_ID_N
 import static com.facebook.presto.hive.metastore.MetastoreUtil.PRESTO_VIEW_FLAG;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.getHiveSchema;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.getProtectMode;
-import static com.facebook.presto.hive.metastore.MetastoreUtil.isNumericType;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.toPartitionValues;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.verifyOnline;
 import static com.facebook.presto.hive.metastore.PrestoTableType.EXTERNAL_TABLE;
@@ -910,8 +913,6 @@ public class HiveMetadata
                     "create an encrypted table without partitions");
         }
 
-        Map<String, String> tableProperties = getEmptyTableProperties(tableMetadata, new HdfsContext(session, schemaName, tableName), hiveStorageFormat, tableEncryptionProperties);
-
         validateColumns(hiveStorageFormat, columnHandles);
 
         Map<String, HiveColumnHandle> columnHandlesByName = Maps.uniqueIndex(columnHandles, HiveColumnHandle::getName);
@@ -930,13 +931,19 @@ public class HiveMetadata
             }
 
             tableType = EXTERNAL_TABLE;
-            targetPath = getExternalPath(new HdfsContext(session, schemaName, tableName), externalLocation);
+            targetPath = getExternalPath(new HdfsContext(session, schemaName, tableName, externalLocation, true), externalLocation);
         }
         else {
             tableType = MANAGED_TABLE;
             LocationHandle locationHandle = locationService.forNewTable(metastore, session, schemaName, tableName, isTempPathRequired(session, bucketProperty, preferredOrderingColumns));
             targetPath = locationService.getQueryWriteInfo(locationHandle).getTargetPath();
         }
+
+        Map<String, String> tableProperties = getEmptyTableProperties(
+                tableMetadata,
+                new HdfsContext(session, schemaName, tableName, targetPath.toString(), true),
+                hiveStorageFormat,
+                tableEncryptionProperties);
 
         Table table = buildTableObject(
                 session.getQueryId(),
@@ -1379,7 +1386,10 @@ public class HiveMetadata
         if (!target.isPresent()) {
             throw new TableNotFoundException(tableName);
         }
-        metastore.dropTable(session, handle.getSchemaName(), handle.getTableName());
+        metastore.dropTable(
+                new HdfsContext(session, handle.getSchemaName(), handle.getTableName(), target.get().getStorage().getLocation(), false),
+                handle.getSchemaName(),
+                handle.getTableName());
     }
 
     @Override
@@ -1477,7 +1487,6 @@ public class HiveMetadata
         String tableName = schemaTableName.getTableName();
 
         Optional<TableEncryptionProperties> tableEncryptionProperties = getTableEncryptionPropertiesFromTableProperties(tableMetadata, tableStorageFormat, partitionedBy);
-        Map<String, String> tableProperties = getEmptyTableProperties(tableMetadata, new HdfsContext(session, schemaName, tableName), tableStorageFormat, tableEncryptionProperties);
         List<HiveColumnHandle> columnHandles = getColumnHandles(tableMetadata, ImmutableSet.copyOf(partitionedBy), typeTranslator);
         HiveStorageFormat partitionStorageFormat = isRespectTableFormat(session) ? tableStorageFormat : getHiveStorageFormat(session);
 
@@ -1504,6 +1513,13 @@ public class HiveMetadata
         checkPartitionTypesSupported(partitionColumns);
 
         LocationHandle locationHandle = locationService.forNewTable(metastore, session, schemaName, tableName, isTempPathRequired(session, bucketProperty, preferredOrderingColumns));
+
+        HdfsContext context = new HdfsContext(session, schemaName, tableName, locationHandle.getTargetPath().toString(), true);
+        Map<String, String> tableProperties = getEmptyTableProperties(
+                tableMetadata,
+                context,
+                tableStorageFormat,
+                tableEncryptionProperties);
         HiveOutputTableHandle result = new HiveOutputTableHandle(
                 schemaName,
                 tableName,
@@ -1524,7 +1540,7 @@ public class HiveMetadata
 
         WriteInfo writeInfo = locationService.getQueryWriteInfo(locationHandle);
         metastore.declareIntentionToWrite(
-                session,
+                context,
                 writeInfo.getWriteMode(),
                 writeInfo.getWritePath(),
                 writeInfo.getTempPath(),
@@ -1579,10 +1595,14 @@ public class HiveMetadata
         partitionUpdates = PartitionUpdate.mergePartitionUpdates(partitionUpdates);
 
         if (handle.getBucketProperty().isPresent()) {
-            ImmutableList<PartitionUpdate> partitionUpdatesForMissingBuckets = computePartitionUpdatesForMissingBuckets(session, handle, table, partitionUpdates);
+            ImmutableList<PartitionUpdate> partitionUpdatesForMissingBuckets = computePartitionUpdatesForMissingBuckets(
+                    session,
+                    handle,
+                    table,
+                    partitionUpdates);
             // replace partitionUpdates before creating the zero-row files so that those files will be cleaned up if we end up rollback
             partitionUpdates = PartitionUpdate.mergePartitionUpdates(Iterables.concat(partitionUpdates, partitionUpdatesForMissingBuckets));
-            HdfsContext hdfsContext = new HdfsContext(session, table.getDatabaseName(), table.getTableName());
+            HdfsContext hdfsContext = new HdfsContext(session, table.getDatabaseName(), table.getTableName(), table.getStorage().getLocation(), true);
             for (PartitionUpdate partitionUpdate : partitionUpdatesForMissingBuckets) {
                 Optional<Partition> partition = table.getPartitionColumns().isEmpty() ? Optional.empty() :
                         Optional.of(partitionObjectBuilder.buildPartitionObject(session, table, partitionUpdate, prestoVersion, partitionEncryptionParameters));
@@ -1623,7 +1643,12 @@ public class HiveMetadata
             Verify.verify(handle.getPartitionStorageFormat() == handle.getTableStorageFormat());
         }
         for (PartitionUpdate update : partitionUpdates) {
-            Partition partition = partitionObjectBuilder.buildPartitionObject(session, table, update, prestoVersion, partitionEncryptionParameters);
+            Map<String, String> partitionParameters = partitionEncryptionParameters;
+            if (isPreferManifestsToListFiles(session) && isFileRenamingEnabled(session)) {
+                // Store list of file names and sizes in partition metadata when prefer_manifests_to_list_files and file_renaming_enabled are set to true
+                partitionParameters = updatePartitionMetadataWithFileNamesAndSizes(update, partitionParameters);
+            }
+            Partition partition = partitionObjectBuilder.buildPartitionObject(session, table, update, prestoVersion, partitionParameters);
             PartitionStatistics partitionStatistics = createPartitionStatistics(
                     session,
                     update.getStatistics(),
@@ -1633,7 +1658,9 @@ public class HiveMetadata
                     session,
                     handle.getSchemaName(),
                     handle.getTableName(),
-                    partitionObjectBuilder.buildPartitionObject(session, table, update, prestoVersion, partitionEncryptionParameters),
+                    table.getStorage().getLocation(),
+                    true,
+                    partitionObjectBuilder.buildPartitionObject(session, table, update, prestoVersion, partitionParameters),
                     update.getWritePath(),
                     partitionStatistics);
         }
@@ -1642,6 +1669,11 @@ public class HiveMetadata
                 partitionUpdates.stream()
                         .map(PartitionUpdate::getName)
                         .collect(Collectors.toList())));
+    }
+
+    public static boolean shouldCreateFilesForMissingBuckets(Table table, ConnectorSession session)
+    {
+        return !table.getTableType().equals(TEMPORARY_TABLE) || shouldCreateEmptyBucketFilesForTemporaryTable(session);
     }
 
     private Properties getSchema(Optional<Partition> partition, Table table)
@@ -1660,9 +1692,13 @@ public class HiveMetadata
             Table table,
             List<PartitionUpdate> partitionUpdates)
     {
+        // avoid creation of PartitionUpdate with empty list of files
+        if (!shouldCreateFilesForMissingBuckets(table, session)) {
+            return ImmutableList.of();
+        }
         HiveStorageFormat storageFormat = table.getPartitionColumns().isEmpty() ? handle.getTableStorageFormat() : handle.getPartitionStorageFormat();
 
-        // empty unpartitioned bucketed table
+        // empty un-partitioned bucketed table
         if (table.getPartitionColumns().isEmpty() && partitionUpdates.isEmpty()) {
             int bucketCount = handle.getBucketProperty().get().getBucketCount();
             LocationHandle locationHandle = handle.getLocationHandle();
@@ -1679,11 +1715,12 @@ public class HiveMetadata
                     locationHandle.getWritePath(),
                     locationHandle.getTargetPath(),
                     fileNamesForMissingBuckets.stream()
-                            .map(fileName -> new FileWriteInfo(fileName, fileName, Optional.empty()))
+                            .map(fileName -> new FileWriteInfo(fileName, fileName, Optional.of(0L)))
                             .collect(toImmutableList()),
                     0,
                     0,
-                    0));
+                    0,
+                    isFileRenamingEnabled(session)));
         }
 
         ImmutableList.Builder<PartitionUpdate> partitionUpdatesForMissingBucketsBuilder = ImmutableList.builder();
@@ -1703,11 +1740,12 @@ public class HiveMetadata
                     partitionUpdate.getWritePath(),
                     partitionUpdate.getTargetPath(),
                     fileNamesForMissingBuckets.stream()
-                            .map(fileName -> new FileWriteInfo(fileName, fileName, Optional.empty()))
+                            .map(fileName -> new FileWriteInfo(fileName, fileName, Optional.of(0L)))
                             .collect(toImmutableList()),
                     0,
                     0,
-                    0));
+                    0,
+                    isFileRenamingEnabled(session)));
         }
         return partitionUpdatesForMissingBucketsBuilder.build();
     }
@@ -1727,7 +1765,7 @@ public class HiveMetadata
         String fileExtension = getFileExtension(fromHiveStorageFormat(storageFormat), compressionCodec);
         ImmutableList.Builder<String> missingFileNamesBuilder = ImmutableList.builder();
         for (int i = 0; i < bucketCount; i++) {
-            String targetFileName = HiveSessionProperties.isFileRenamingEnabled(session) ? String.valueOf(i) : HiveWriterFactory.computeBucketedFileName(filePrefix, i) + fileExtension;
+            String targetFileName = isFileRenamingEnabled(session) ? String.valueOf(i) : HiveWriterFactory.computeBucketedFileName(filePrefix, i) + fileExtension;
             if (!existingFileNames.contains(targetFileName)) {
                 missingFileNamesBuilder.add(targetFileName);
             }
@@ -1809,7 +1847,7 @@ public class HiveMetadata
 
         WriteInfo writeInfo = locationService.getQueryWriteInfo(locationHandle);
         metastore.declareIntentionToWrite(
-                session,
+                new HdfsContext(session, tableName.getSchemaName(), tableName.getTableName(), table.get().getStorage().getLocation(), false),
                 writeInfo.getWriteMode(),
                 writeInfo.getWritePath(),
                 writeInfo.getTempPath(),
@@ -1849,10 +1887,14 @@ public class HiveMetadata
         }
 
         if (handle.getBucketProperty().isPresent()) {
-            ImmutableList<PartitionUpdate> partitionUpdatesForMissingBuckets = computePartitionUpdatesForMissingBuckets(session, handle, table.get(), partitionUpdates);
+            ImmutableList<PartitionUpdate> partitionUpdatesForMissingBuckets = computePartitionUpdatesForMissingBuckets(
+                    session,
+                    handle,
+                    table.get(),
+                    partitionUpdates);
             // replace partitionUpdates before creating the zero-row files so that those files will be cleaned up if we end up rollback
             partitionUpdates = PartitionUpdate.mergePartitionUpdates(Iterables.concat(partitionUpdates, partitionUpdatesForMissingBuckets));
-            HdfsContext hdfsContext = new HdfsContext(session, table.get().getDatabaseName(), table.get().getTableName());
+            HdfsContext hdfsContext = new HdfsContext(session, table.get().getDatabaseName(), table.get().getTableName(), table.get().getStorage().getLocation(), false);
             for (PartitionUpdate partitionUpdate : partitionUpdatesForMissingBuckets) {
                 Optional<Partition> partition = table.get().getPartitionColumns().isEmpty() ? Optional.empty() :
                         Optional.of(partitionObjectBuilder.buildPartitionObject(
@@ -1918,6 +1960,7 @@ public class HiveMetadata
                         session,
                         handle.getSchemaName(),
                         handle.getTableName(),
+                        handle.getLocationHandle().getTargetPath().toString(),
                         partitionValues,
                         partitionUpdate.getWritePath(),
                         getTargetFileNames(partitionUpdate.getFileWriteInfos()),
@@ -1928,10 +1971,13 @@ public class HiveMetadata
                         .map(encryptionInfo -> encryptionInfo.getDwrfEncryptionMetadata().map(DwrfEncryptionMetadata::getExtraMetadata).orElseGet(ImmutableMap::of))
                         .orElseGet(ImmutableMap::of);
 
-                // TODO: Put the manifest blob in partition parameters
+                if (isPreferManifestsToListFiles(session) && isFileRenamingEnabled(session)) {
+                    // Store list of file names and sizes in partition metadata when prefer_manifests_to_list_files and file_renaming_enabled are set to true
+                    extraPartitionMetadata = updatePartitionMetadataWithFileNamesAndSizes(partitionUpdate, extraPartitionMetadata);
+                }
+
                 // Track the manifest blob size
-                Optional<Page> manifestBlob = createPartitionManifest(partitionUpdate);
-                manifestBlob.ifPresent(manifest -> hivePartitionStats.addManifestSizeInBytes(manifest.getRetainedSizeInBytes()));
+                getManifestSizeInBytes(session, partitionUpdate, extraPartitionMetadata).ifPresent(hivePartitionStats::addManifestSizeInBytes);
 
                 // insert into new partition or overwrite existing partition
                 Partition partition = partitionObjectBuilder.buildPartitionObject(
@@ -1945,7 +1991,7 @@ public class HiveMetadata
                 }
                 if (existingPartitions.contains(partitionUpdate.getName())) {
                     if (partitionUpdate.getUpdateMode() == OVERWRITE) {
-                        metastore.dropPartition(session, handle.getSchemaName(), handle.getTableName(), partition.getValues());
+                        metastore.dropPartition(session, handle.getSchemaName(), handle.getTableName(), handle.getLocationHandle().getTargetPath().toString(), partition.getValues());
                     }
                     else {
                         throw new PrestoException(HIVE_PARTITION_READ_ONLY, "Cannot insert into an existing partition of Hive table: " + partitionUpdate.getName());
@@ -1956,7 +2002,15 @@ public class HiveMetadata
                         partitionUpdate.getStatistics(),
                         columnTypes,
                         getColumnStatistics(partitionComputedStatistics, partition.getValues()));
-                metastore.addPartition(session, handle.getSchemaName(), handle.getTableName(), partition, partitionUpdate.getWritePath(), partitionStatistics);
+                metastore.addPartition(
+                        session,
+                        handle.getSchemaName(),
+                        handle.getTableName(),
+                        table.get().getStorage().getLocation(),
+                        false,
+                        partition,
+                        partitionUpdate.getWritePath(),
+                        partitionStatistics);
             }
             else {
                 throw new IllegalArgumentException(format("Unsupported update mode: %s", partitionUpdate.getUpdateMode()));
@@ -2127,7 +2181,10 @@ public class HiveMetadata
         }
 
         try {
-            metastore.dropTable(session, viewName.getSchemaName(), viewName.getTableName());
+            metastore.dropTable(
+                    new HdfsContext(session, viewName.getSchemaName()),
+                    viewName.getSchemaName(),
+                    viewName.getTableName());
         }
         catch (TableNotFoundException e) {
             throw new ViewNotFoundException(e.getTableName());
@@ -2199,7 +2256,7 @@ public class HiveMetadata
         }
         else {
             for (HivePartition hivePartition : getOrComputePartitions(layoutHandle, session, tableHandle)) {
-                metastore.dropPartition(session, handle.getSchemaName(), handle.getTableName(), toPartitionValues(hivePartition.getPartitionId()));
+                metastore.dropPartition(session, handle.getSchemaName(), handle.getTableName(), table.get().getStorage().getLocation(), toPartitionValues(hivePartition.getPartitionId()));
             }
         }
         // it is too expensive to determine the exact number of deleted rows
@@ -2315,11 +2372,16 @@ public class HiveMetadata
         }
 
         TupleDomain<Subfield> domainPredicate = hivePartitionResult.getEffectivePredicate().transform(HiveMetadata::toSubfield);
+        Table table = metastore.getTable(
+                handle.getSchemaTableName().getSchemaName(),
+                handle.getSchemaTableName().getTableName())
+                .orElseThrow(() -> new TableNotFoundException(handle.getSchemaTableName()));
         return ImmutableList.of(new ConnectorTableLayoutResult(
                 getTableLayout(
                         session,
                         new HiveTableLayoutHandle(
                                 handle.getSchemaTableName(),
+                                table.getStorage().getLocation(),
                                 hivePartitionResult.getPartitionColumns(),
                                 // remove comments to optimize serialization costs
                                 pruneColumnComments(hivePartitionResult.getDataColumns()),
@@ -2558,6 +2620,7 @@ public class HiveMetadata
 
         return new HiveTableLayoutHandle(
                 hiveLayoutHandle.getSchemaTableName(),
+                hiveLayoutHandle.getTablePath(),
                 hiveLayoutHandle.getPartitionColumns(),
                 hiveLayoutHandle.getDataColumns(),
                 hiveLayoutHandle.getTableParameters(),
@@ -2944,14 +3007,26 @@ public class HiveMetadata
     public CompletableFuture<Void> commitPageSinkAsync(ConnectorSession session, ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments)
     {
         HiveOutputTableHandle handle = (HiveOutputTableHandle) tableHandle;
-        return toCompletableFuture(stagingFileCommitter.commitFiles(session, handle.getSchemaName(), handle.getTableName(), getPartitionUpdates(fragments)));
+        return toCompletableFuture(stagingFileCommitter.commitFiles(
+                session,
+                handle.getSchemaName(),
+                handle.getTableName(),
+                handle.getLocationHandle().getTargetPath().toString(),
+                true,
+                getPartitionUpdates(fragments)));
     }
 
     @Override
     public CompletableFuture<Void> commitPageSinkAsync(ConnectorSession session, ConnectorInsertTableHandle tableHandle, Collection<Slice> fragments)
     {
         HiveInsertTableHandle handle = (HiveInsertTableHandle) tableHandle;
-        return toCompletableFuture(stagingFileCommitter.commitFiles(session, handle.getSchemaName(), handle.getTableName(), getPartitionUpdates(fragments)));
+        return toCompletableFuture(stagingFileCommitter.commitFiles(
+                session,
+                handle.getSchemaName(),
+                handle.getTableName(),
+                handle.getLocationHandle().getTargetPath().toString(),
+                false,
+                getPartitionUpdates(fragments)));
     }
 
     @Override

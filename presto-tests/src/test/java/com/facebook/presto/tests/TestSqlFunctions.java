@@ -14,6 +14,14 @@
 package com.facebook.presto.tests;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.common.QualifiedObjectName;
+import com.facebook.presto.common.type.TypeSignature;
+import com.facebook.presto.common.type.TypeSignatureParameter;
+import com.facebook.presto.common.type.UserDefinedType;
+import com.facebook.presto.spi.function.Parameter;
+import com.facebook.presto.spi.function.RoutineCharacteristics;
+import com.facebook.presto.spi.function.SqlFunctionId;
+import com.facebook.presto.spi.function.SqlInvokedFunction;
 import com.facebook.presto.testing.MaterializedResult;
 import com.facebook.presto.testing.MaterializedRow;
 import com.facebook.presto.testing.QueryRunner;
@@ -25,7 +33,13 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 import java.util.List;
+import java.util.Optional;
 
+import static com.facebook.presto.common.type.BigintEnumType.LongEnumMap;
+import static com.facebook.presto.common.type.StandardTypes.BIGINT_ENUM;
+import static com.facebook.presto.common.type.StandardTypes.VARCHAR_ENUM;
+import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
+import static com.facebook.presto.common.type.VarcharEnumType.VarcharEnumMap;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static com.facebook.presto.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -36,6 +50,22 @@ import static org.testng.Assert.assertEquals;
 public class TestSqlFunctions
         extends AbstractTestQueryFramework
 {
+    private static final UserDefinedType MOOD_ENUM = new UserDefinedType(QualifiedObjectName.valueOf("testing.enum.mood"), new TypeSignature(
+            BIGINT_ENUM,
+            TypeSignatureParameter.of(new LongEnumMap("testing.enum.mood", ImmutableMap.of(
+                    "HAPPY", 0L,
+                    "SAD", 1L,
+                    "MELLOW", Long.MAX_VALUE,
+                    "curious", -2L)))));
+    private static final UserDefinedType COUNTRY_ENUM = new UserDefinedType(QualifiedObjectName.valueOf("testing.enum.country"), new TypeSignature(
+            VARCHAR_ENUM,
+            TypeSignatureParameter.of(new VarcharEnumMap("testing.enum.country", ImmutableMap.of(
+                    "US", "United States",
+                    "BAHAMAS", "The Bahamas",
+                    "FRANCE", "France",
+                    "CHINA", "中国",
+                    "भारत", "India")))));
+
     protected TestSqlFunctions()
     {
         super(TestSqlFunctions::createQueryRunner);
@@ -59,10 +89,14 @@ public class TestSqlFunctions
                     ImmutableMap.of(
                             "supported-function-languages", "sql, java",
                             "java.function-implementation-type", "THRIFT",
+                            "java.thrift-page-format", "PRESTO_SERIALIZED",
                             "java.thrift.client.addresses", "localhost:7779"));
             queryRunner.createTestFunctionNamespace("testing", "common");
             queryRunner.createTestFunctionNamespace("testing", "test");
             queryRunner.createTestFunctionNamespace("example", "example");
+            queryRunner.getMetadata().getFunctionAndTypeManager().addUserDefinedType(MOOD_ENUM);
+            queryRunner.getMetadata().getFunctionAndTypeManager().addUserDefinedType(COUNTRY_ENUM);
+
             return queryRunner;
         }
         catch (Exception e) {
@@ -109,8 +143,28 @@ public class TestSqlFunctions
     @Test
     public void testCreateFunction()
     {
-        assertQuerySucceeds("CREATE FUNCTION testing.test.tan (x int) RETURNS double RETURN sin(x) / cos(x)");
+        assertQuerySucceeds("CREATE FUNCTION TESTING.TEST.TAN (x int) RETURNS double RETURN sin(x) / cos(x)");
         assertQuerySucceeds("CREATE FUNCTION testing.test.tan (x double) RETURNS double LANGUAGE JAVA RETURN sin(x) / cos(x)");
+
+        // function with enums
+        assertQuerySucceeds("CREATE FUNCTION testing.test.is_china(country testing.enum.country) RETURNS boolean RETURN country = testing.enum.country.CHINA");
+        assertQuery("SELECT testing.test.is_china(testing.enum.country.CHINA)", "SELECT true");
+        assertQuery("SELECT testing.test.is_china(testing.enum.country.\"भारत\")", "SELECT false");
+
+        assertQuerySucceeds("CREATE FUNCTION testing.test.has_china(countries array<testing.enum.country>) RETURNS boolean RETURN any_match(countries, x -> x = testing.enum.country.CHINA)");
+        assertQuery("SELECT testing.test.has_china(array[testing.enum.country.US, testing.enum.country.FRANCE])", "SELECT false");
+        assertQuery("SELECT testing.test.has_china(array[testing.enum.country.US, testing.enum.country.FRANCE, testing.enum.country.china])", "SELECT true");
+
+        assertQuerySucceeds("CREATE FUNCTION testing.test.get_mood(x varchar) RETURNS testing.enum.mood RETURN if(x='foo', testing.enum.mood.happy, testing.enum.mood.curious)");
+        MaterializedResult rows = computeActual("SELECT testing.test.get_mood('foo')");
+        assertEquals(rows.getTypes().get(0).getDisplayName(), "testing.enum.mood");
+        assertEquals(rows.getMaterializedRows().get(0).getFields().get(0), 0L);
+        rows = computeActual("SELECT testing.test.get_mood('bar')");
+        assertEquals(rows.getTypes().get(0).getDisplayName(), "testing.enum.mood");
+        assertEquals(rows.getMaterializedRows().get(0).getFields().get(0), -2L);
+
+        assertQueryFails("CREATE FUNCTION testing.test.invalid(e testing.enum.not_exist) RETURNS boolean RETURN e IS NOT NULL", ".*Type testing.enum.not_exist not found");
+        assertQueryFails("CREATE FUNCTION testing.test.is_uk(country testing.enum.country) RETURNS boolean RETURN country = testing.enum.country.UK", ".*'testing.enum.country.uk' cannot be resolved");
 
         // external function
         assertQuerySucceeds("CREATE FUNCTION testing.test.foo(x varchar) RETURNS varchar LANGUAGE JAVA EXTERNAL");
@@ -222,8 +276,8 @@ public class TestSqlFunctions
 
     public void testInvalidFunctionName()
     {
-        assertQueryFails("SELECT x.y(1)", ".*Non-builtin functions must be referenced by 'catalog\\.schema\\.function_name', found: x\\.y");
-        assertQueryFails("SELECT x.y.z.w()", ".*Non-builtin functions must be referenced by 'catalog\\.schema\\.function_name', found: x\\.y\\.z\\.w");
+        assertQueryFails("SELECT x.y(1)", ".*Functions that are not temporary or builtin must be referenced by 'catalog\\.schema\\.function_name', found: x\\.y");
+        assertQueryFails("SELECT x.y.z.w()", ".*Functions that are not temporary or builtin must be referenced by 'catalog\\.schema\\.function_name', found: x\\.y\\.z\\.w");
     }
 
     @Test
@@ -233,6 +287,39 @@ public class TestSqlFunctions
                 "RETURNS array<int>\n" +
                 "RETURN concat(a, array[x])");
         assertQuery("SELECT testing.common.array_append(ARRAY[1, 2, 4], 8)", "SELECT ARRAY[1, 2, 4, 8]");
+    }
+
+    @Test
+    public void testTemporarySqlFunctions()
+    {
+        assertQuery(createSessionWithTempFunctionFoo(), "SELECT foo(2)", "SELECT 4");
+        assertQuery(createSessionWithTempFunctionFoo(), "SELECT abs(foo(-2))", "SELECT 4");
+        assertQuery(createSessionWithTempFunctionFoo(), "SELECT foo(foo(2))", "SELECT 8");
+    }
+
+    @Test
+    public void testShowTemporaryFunctions()
+    {
+        MaterializedResult result = computeActual(createSessionWithTempFunctionFoo(), "SHOW FUNCTIONS");
+        MaterializedRow row = result.getMaterializedRows().get(result.getMaterializedRows().size() - 1);
+        assertEquals(row.getField(0), "foo");
+    }
+
+    @Test
+    public void testShowCreateTemporaryFunction()
+    {
+        MaterializedRow result = computeActual(createSessionWithTempFunctionFoo(), "SHOW CREATE FUNCTION foo(bigint)").getMaterializedRows().get(0);
+        String createFunctionFooFormatted = "CREATE TEMPORARY FUNCTION foo (\n" +
+                "   x bigint\n" +
+                ")\n" +
+                "RETURNS bigint\n" +
+                "COMMENT ''\n" +
+                "LANGUAGE SQL\n" +
+                "NOT DETERMINISTIC\n" +
+                "CALLED ON NULL INPUT\n" +
+                "RETURN (x * 2)";
+        assertEquals(result.getField(0), createFunctionFooFormatted);
+        assertEquals(result.getField(1), "bigint");
     }
 
     @Test
@@ -415,5 +502,21 @@ public class TestSqlFunctions
     {
         assertQuerySucceeds("CREATE FUNCTION testing.test.foo(x varchar) RETURNS varchar LANGUAGE JAVA EXTERNAL");
         assertQueryFails("SELECT reduce(a, '', (s, x) -> s || testing.test.foo(x), s -> s) from (VALUES (array['a', 'b'])) t(a)", ".*External functions in Lambda expression is not supported:.*");
+    }
+
+    private Session createSessionWithTempFunctionFoo()
+    {
+        SqlFunctionId bigintSignature = new SqlFunctionId(QualifiedObjectName.valueOf("presto.session.foo"), ImmutableList.of(parseTypeSignature("bigint")));
+        SqlInvokedFunction bigintFunction = new SqlInvokedFunction(
+                bigintSignature.getFunctionName(),
+                ImmutableList.of(new Parameter("x", parseTypeSignature("bigint"))),
+                parseTypeSignature("bigint"),
+                "",
+                RoutineCharacteristics.builder().build(),
+                "RETURN x * 2",
+                Optional.empty());
+        return testSessionBuilder()
+                .addSessionFunction(bigintSignature, bigintFunction)
+                .build();
     }
 }

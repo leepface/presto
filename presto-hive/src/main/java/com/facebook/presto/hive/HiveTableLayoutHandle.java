@@ -15,9 +15,11 @@ package com.facebook.presto.hive;
 
 import com.facebook.presto.common.Subfield;
 import com.facebook.presto.common.predicate.TupleDomain;
+import com.facebook.presto.common.predicate.TupleDomain.ColumnDomain;
 import com.facebook.presto.hive.HiveBucketing.HiveBucketFilter;
 import com.facebook.presto.hive.metastore.Column;
 import com.facebook.presto.spi.ColumnHandle;
+import com.facebook.presto.spi.ConnectorSplit;
 import com.facebook.presto.spi.ConnectorTableLayoutHandle;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.relation.RowExpression;
@@ -34,12 +36,15 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
 
 public final class HiveTableLayoutHandle
         implements ConnectorTableLayoutHandle
 {
     private final SchemaTableName schemaTableName;
+    private final String tablePath;
     private final List<HiveColumnHandle> partitionColumns;
     private final List<Column> dataColumns;
     private final Map<String, String> tableParameters;
@@ -61,6 +66,7 @@ public final class HiveTableLayoutHandle
     @JsonCreator
     public HiveTableLayoutHandle(
             @JsonProperty("schemaTableName") SchemaTableName schemaTableName,
+            @JsonProperty("tablePath") String tablePath,
             @JsonProperty("partitionColumns") List<HiveColumnHandle> partitionColumns,
             @JsonProperty("dataColumns") List<Column> dataColumns,
             @JsonProperty("tableParameters") Map<String, String> tableParameters,
@@ -76,6 +82,7 @@ public final class HiveTableLayoutHandle
             @JsonProperty("partialAggregationsPushedDown") boolean partialAggregationsPushedDown)
     {
         this.schemaTableName = requireNonNull(schemaTableName, "table is null");
+        this.tablePath = requireNonNull(tablePath, "tablePath is null");
         this.partitionColumns = ImmutableList.copyOf(requireNonNull(partitionColumns, "partitionColumns is null"));
         this.dataColumns = ImmutableList.copyOf(requireNonNull(dataColumns, "dataColumns is null"));
         this.tableParameters = ImmutableMap.copyOf(requireNonNull(tableParameters, "tableProperties is null"));
@@ -94,6 +101,7 @@ public final class HiveTableLayoutHandle
 
     public HiveTableLayoutHandle(
             SchemaTableName schemaTableName,
+            String tablePath,
             List<HiveColumnHandle> partitionColumns,
             List<Column> dataColumns,
             Map<String, String> tableParameters,
@@ -110,6 +118,7 @@ public final class HiveTableLayoutHandle
             boolean partialAggregationsPushedDown)
     {
         this.schemaTableName = requireNonNull(schemaTableName, "table is null");
+        this.tablePath = requireNonNull(tablePath, "tablePath is null");
         this.partitionColumns = ImmutableList.copyOf(requireNonNull(partitionColumns, "partitionColumns is null"));
         this.dataColumns = ImmutableList.copyOf(requireNonNull(dataColumns, "dataColumns is null"));
         this.tableParameters = ImmutableMap.copyOf(requireNonNull(tableParameters, "tableProperties is null"));
@@ -130,6 +139,12 @@ public final class HiveTableLayoutHandle
     public SchemaTableName getSchemaTableName()
     {
         return schemaTableName;
+    }
+
+    @JsonProperty
+    public String getTablePath()
+    {
+        return tablePath;
     }
 
     @JsonProperty
@@ -228,8 +243,22 @@ public final class HiveTableLayoutHandle
     }
 
     @Override
-    public Object getIdentifier()
+    public Object getIdentifier(Optional<ConnectorSplit> split)
     {
+        TupleDomain<Subfield> domainPredicate = this.domainPredicate;
+
+        // If split is provided, we would update the identifier based on split runtime information.
+        if (split.isPresent() && domainPredicate.getColumnDomains().isPresent()) {
+            HiveSplit hiveSplit = (HiveSplit) split.get();
+            Set<Subfield> subfields = hiveSplit.getRedundantColumnDomains().stream()
+                    .map(column -> new Subfield(((HiveColumnHandle) column).getName()))
+                    .collect(toImmutableSet());
+            List<ColumnDomain<Subfield>> columnDomains = domainPredicate.getColumnDomains().get().stream()
+                    .filter(columnDomain -> !subfields.contains(columnDomain.getColumn()))
+                    .collect(toImmutableList());
+            domainPredicate = TupleDomain.fromColumnDomains(Optional.of(columnDomains));
+        }
+
         // Identifier is used to identify if the table layout is providing the same set of data.
         // To achieve this, we need table name, data column predicates and bucket filter.
         // We did not include other fields because they are either table metadata or partition column predicate,

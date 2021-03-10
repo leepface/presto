@@ -13,8 +13,8 @@
  */
 package com.facebook.presto.execution.buffer;
 
-import com.facebook.presto.block.BlockEncodingManager;
 import com.facebook.presto.common.Page;
+import com.facebook.presto.common.block.BlockEncodingManager;
 import com.facebook.presto.common.block.BlockEncodingSerde;
 import com.facebook.presto.spi.page.PageCompressor;
 import com.facebook.presto.spi.page.PageDecompressor;
@@ -39,6 +39,11 @@ public class TestingPagesSerdeFactory
     }
 
     public static PagesSerde testingPagesSerde()
+    {
+        return testingPagesSerde(false);
+    }
+
+    public static PagesSerde testingPagesSerde(boolean checksumEnabled)
     {
         return new SynchronizedPagesSerde(
                 new BlockEncodingManager(),
@@ -90,15 +95,15 @@ public class TestingPagesSerdeFactory
                         decompressor.decompress(input, output);
                     }
                 }),
-                Optional.empty());
+                Optional.empty(), checksumEnabled);
     }
 
     private static class SynchronizedPagesSerde
             extends PagesSerde
     {
-        public SynchronizedPagesSerde(BlockEncodingSerde blockEncodingSerde, Optional<PageCompressor> compressor, Optional<PageDecompressor> decompressor, Optional<SpillCipher> spillCipher)
+        public SynchronizedPagesSerde(BlockEncodingSerde blockEncodingSerde, Optional<PageCompressor> compressor, Optional<PageDecompressor> decompressor, Optional<SpillCipher> spillCipher, boolean checksumEnabled)
         {
-            super(blockEncodingSerde, compressor, decompressor, spillCipher);
+            super(blockEncodingSerde, compressor, decompressor, spillCipher, checksumEnabled);
         }
 
         @Override

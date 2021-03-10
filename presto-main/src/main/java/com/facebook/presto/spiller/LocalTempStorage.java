@@ -18,8 +18,11 @@ import com.facebook.presto.common.io.DataOutput;
 import com.facebook.presto.common.io.DataSink;
 import com.facebook.presto.common.io.OutputStreamDataSink;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.storage.StorageCapabilities;
+import com.facebook.presto.spi.storage.TempDataOperationContext;
 import com.facebook.presto.spi.storage.TempDataSink;
 import com.facebook.presto.spi.storage.TempStorage;
+import com.facebook.presto.spi.storage.TempStorageContext;
 import com.facebook.presto.spi.storage.TempStorageFactory;
 import com.facebook.presto.spi.storage.TempStorageHandle;
 import com.google.common.base.Splitter;
@@ -29,6 +32,8 @@ import javax.annotation.concurrent.GuardedBy;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileStore;
 import java.nio.file.Files;
@@ -41,6 +46,7 @@ import static com.facebook.presto.spi.StandardErrorCode.OUT_OF_SPILL_SPACE;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.nio.file.Files.createDirectories;
 import static java.nio.file.Files.delete;
 import static java.nio.file.Files.getFileStore;
@@ -70,11 +76,10 @@ public class LocalTempStorage
     {
         this.spillPaths = ImmutableList.copyOf(requireNonNull(spillPaths, "spillPaths is null"));
         this.maxUsedSpaceThreshold = maxUsedSpaceThreshold;
+        initialize();
     }
 
-    @Override
-    public void initialize()
-            throws IOException
+    private void initialize()
     {
         // From FileSingleStreamSpillerFactory constructor
         spillPaths.forEach(path -> {
@@ -96,7 +101,7 @@ public class LocalTempStorage
     }
 
     @Override
-    public TempDataSink create()
+    public TempDataSink create(TempDataOperationContext context)
             throws IOException
     {
         Path path = Files.createTempFile(getNextSpillPath(), SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX);
@@ -104,17 +109,42 @@ public class LocalTempStorage
     }
 
     @Override
-    public InputStream open(TempStorageHandle handle)
+    public InputStream open(TempDataOperationContext context, TempStorageHandle handle)
             throws IOException
     {
         return Files.newInputStream(((LocalTempStorageHandle) handle).getFilePath());
     }
 
     @Override
-    public void remove(TempStorageHandle handle)
+    public void remove(TempDataOperationContext context, TempStorageHandle handle)
             throws IOException
     {
         Files.delete(((LocalTempStorageHandle) handle).getFilePath());
+    }
+
+    @Override
+    public byte[] serializeHandle(TempStorageHandle storageHandle)
+    {
+        URI uri = ((LocalTempStorageHandle) storageHandle).getFilePath().toUri();
+        return uri.toString().getBytes(UTF_8);
+    }
+
+    @Override
+    public TempStorageHandle deserialize(byte[] serializedStorageHandle)
+    {
+        String uriString = new String(serializedStorageHandle, UTF_8);
+        try {
+            return new LocalTempStorageHandle(Paths.get(new URI(uriString)));
+        }
+        catch (URISyntaxException e) {
+            throw new IllegalArgumentException("Invalid URI: " + uriString, e);
+        }
+    }
+
+    @Override
+    public List<StorageCapabilities> getStorageCapabilities()
+    {
+        return ImmutableList.of();
     }
 
     private static void cleanupOldSpillFiles(Path path)
@@ -176,6 +206,12 @@ public class LocalTempStorage
         public Path getFilePath()
         {
             return filePath;
+        }
+
+        @Override
+        public String toString()
+        {
+            return filePath.toString();
         }
     }
 
@@ -245,7 +281,7 @@ public class LocalTempStorage
         }
 
         @Override
-        public TempStorage create(Map<String, String> config)
+        public TempStorage create(Map<String, String> config, TempStorageContext context)
         {
             String configPaths = config.get(TEMP_STORAGE_PATH);
             checkState(configPaths != null, "Local temp storage configuration must contain the '%s' property", TEMP_STORAGE_PATH);
