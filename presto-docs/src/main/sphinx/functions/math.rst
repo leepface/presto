@@ -73,6 +73,17 @@ Mathematical Functions
     The mean and value v must be real values and the standard deviation must be a real
     and positive value.
 
+.. function:: inverse_t_cdf(df, p) -> double
+
+    Compute the inverse of the Student's t cdf with given degrees of freedom for the cumulative
+    probability (p): P(N < n). The df parameter must be a positive real value.
+    The probability p must lie on the interval [0, 1].
+
+.. function:: t_cdf(df, v) -> double
+
+    Compute the Student's t cdf with given degrees of freedom.
+    The df parameters must be a positive real number and value v must be a real value.
+
 .. function:: inverse_beta_cdf(a, b, p) -> double
 
     Compute the inverse of the Beta cdf with given a, b parameters for the cumulative
@@ -166,7 +177,7 @@ Mathematical Functions
 .. function:: truncate(x, n) -> double
 
     Returns ``x`` truncated to ``n`` decimal places.
-    ``n`` can be negative to truncate ``n`` digits left of the decimal point. 
+    ``n`` can be negative to truncate ``n`` digits left of the decimal point.
 
     Example:
     ``truncate(REAL '12.333', -1)`` -> result is 10.0

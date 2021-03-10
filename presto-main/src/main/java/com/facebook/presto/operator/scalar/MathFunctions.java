@@ -31,6 +31,7 @@ import com.facebook.presto.type.LiteralParameter;
 import com.google.common.primitives.Doubles;
 import io.airlift.slice.Slice;
 import org.apache.commons.math3.distribution.BetaDistribution;
+import org.apache.commons.math3.distribution.TDistribution;
 import org.apache.commons.math3.special.Erf;
 
 import java.math.BigDecimal;
@@ -686,6 +687,32 @@ public final class MathFunctions
         checkCondition(a > 0, INVALID_FUNCTION_ARGUMENT, "a must be > 0");
         checkCondition(b > 0, INVALID_FUNCTION_ARGUMENT, "b must be > 0");
         BetaDistribution distribution = new BetaDistribution(null, a, b, BetaDistribution.DEFAULT_INVERSE_ABSOLUTE_ACCURACY);
+        return distribution.inverseCumulativeProbability(p);
+    }
+
+    @Description("Student's t cdf given the degrees of freedom and value")
+    @ScalarFunction
+    @SqlType(StandardTypes.DOUBLE)
+    public static double tCdf(
+            @SqlType(StandardTypes.DOUBLE) double df,
+            @SqlType(StandardTypes.DOUBLE) double value)
+    {
+        checkCondition(value >= 0 && value <= 1, INVALID_FUNCTION_ARGUMENT, "value must be in the interval [0, 1]");
+        checkCondition(df > 0, INVALID_FUNCTION_ARGUMENT, "df must be > 0");
+        TDistribution distribution = new TDistribution(null, df, TDistribution.DEFAULT_INVERSE_ABSOLUTE_ACCURACY);
+        return distribution.cumulativeProbability(value);
+    }
+
+    @Description("inverse of Student's t cdf given the degrees of freedom and probability")
+    @ScalarFunction
+    @SqlType(StandardTypes.DOUBLE)
+    public static double inversetCdf(
+            @SqlType(StandardTypes.DOUBLE) double df,
+            @SqlType(StandardTypes.DOUBLE) double p)
+    {
+        checkCondition(p >= 0 && p <= 1, INVALID_FUNCTION_ARGUMENT, "p must be in the interval [0, 1]");
+        checkCondition(df > 0, INVALID_FUNCTION_ARGUMENT, "df must be > 0");
+        TDistribution distribution = new TDistribution(null, df, TDistribution.DEFAULT_INVERSE_ABSOLUTE_ACCURACY);
         return distribution.inverseCumulativeProbability(p);
     }
 
