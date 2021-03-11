@@ -17,6 +17,7 @@ import com.facebook.presto.common.Page;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.type.TypeSignature;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
+import com.facebook.presto.operator.aggregation.state.CentralMomentsArrayState;
 import com.facebook.presto.operator.aggregation.state.CentralMomentsState;
 import com.facebook.presto.operator.aggregation.state.CorrelationState;
 import com.facebook.presto.operator.aggregation.state.CovarianceState;
@@ -89,6 +90,25 @@ public final class AggregationUtils
         double deltaN = delta / n;
         double deltaN2 = deltaN * deltaN;
         double dm2 = delta * deltaN * n1;
+        state.setCount(n);
+        state.setM1(m1 + deltaN);
+        state.setM2(m2 + dm2);
+        state.setM3(m3 + dm2 * deltaN * (n - 2) - 3 * deltaN * m2);
+        state.setM4(state.getM4() + dm2 * deltaN2 * (n * (double) n - 3 * n + 3) + 6 * deltaN2 * m2 - 4 * deltaN * m3);
+    }
+
+    public static void updateCentralMomentsArrayState(CentralMomentsArrayState state, double value, long group)
+    {
+        List<Long> n1 = state.getCount();
+        List<Long> n = n1 + 1;
+        List<Double> m1 = state.getM1();
+        List<Double> m2 = state.getM2();
+        List<Double> m3 = state.getM3();
+        List<Double> delta = value - m1;
+        List<Double> deltaN = delta / n;
+        List<Double> deltaN2 = deltaN * deltaN;
+        List<Double> dm2 = delta * deltaN * n1;
+
         state.setCount(n);
         state.setM1(m1 + deltaN);
         state.setM2(m2 + dm2);
